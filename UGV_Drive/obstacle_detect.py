@@ -182,9 +182,9 @@ def obstacle_in_path(detections, frame_shape, corridor_width_ratio=0.35, min_are
         overlap_w = max(0, overlap_x2 - overlap_x1)
 
         if overlap_w > 0:
-            return True, (cx1, cx2)  # obstacle present, return corridor bounds
+            return True, (cx1, cx2), d["cls_name"]  # obstacle present, return corridor bounds
 
-    return False, (cx1, cx2)
+    return False, (cx1, cx2), None
 
 
 def draw_overlay(frame, detections, is_obstacle, corridor_bounds):
@@ -229,7 +229,7 @@ def main():
     args = parser.parse_args()
 
     cam = Camera(source=args.source, webcam_index=args.webcam_index)
-    det = YOLODetector(model_name=args.model, conf=args.conf)
+    det = YOLODetector(model_name="yolov8n.pt", conf=0.25)
 
     cv2.namedWindow("Obstacle Detection", cv2.WINDOW_NORMAL)
 
@@ -252,7 +252,7 @@ def main():
 
             detections = det.detect(frame)
 
-            is_obs, corridor_bounds = obstacle_in_path(
+            is_obs, corridor_bounds, obstacle_name = obstacle_in_path(
                 detections, frame.shape,
                 corridor_width_ratio=args.corridor_width,
                 min_area_ratio=args.min_area
@@ -263,7 +263,7 @@ def main():
 
             # Print a simple console message too (useful for drone logic later)
             if is_obs:
-                print("[OBSTACLE] Object detected in path corridor.")
+                print(f"[OBSTACLE] {obstacle_name} detected in front.")
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
