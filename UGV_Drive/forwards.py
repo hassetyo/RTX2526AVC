@@ -16,7 +16,7 @@ from pymavlink import mavutil
 import time
 
 # ---- CONFIG ----
-CONNECTION_STRING = "/dev/ttyACM0"   # common for Rover SITL; change if needed
+CONNECTION_STRING = "udp:127.0.0.1:14551"   # common for Rover SITL; change if needed
 FORWARD_DISTANCE_M = 5.0
 TARGET_SPEED_MS = 1.0
 CONTROL_HZ = 20
