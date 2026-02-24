@@ -26,7 +26,7 @@ ACK_RESULTS = {
 
 #False if irl testing
 #True if simulation testing
-USE_SITL = False 
+USE_SITL = False
 
 if USE_SITL:
     CONNECTION_STRING = "udp:127.0.0.1:14551"   
@@ -236,7 +236,7 @@ def read_messages():
         elif mtype == "COMMAND_ACK":
             #print("Ack Error: ", msg.command, msg.result)
             if (msg.result != 0 and msg.result != 5):
-                return msg.result
+                return msg
 
 #return the error message, if there is one
 def wait_for_msg():
@@ -257,17 +257,23 @@ if __name__ == "__main__":
     msgID = wait_for_msg()
     if msgID is not None:
         #this is the error
-        raise RuntimeError("ACK Error: Command ", ACK_RESULTS.get(msgID, msgID))
+        print("***** Error encountered *****")
+        change_mode("LAND")
+        raise RuntimeError(f"ACK Error: Command {msgID.command} {ACK_RESULTS.get(msgID.result, msgID.result)}")
 
     arm_drone()
     msgID = wait_for_msg()
     if msgID is not None:
-        raise RuntimeError("ACK Error: Command ", ACK_RESULTS.get(msgID, msgID))
+        print("***** Error Encountered *****")
+        change_mode("LAND")
+        raise RuntimeError(f"ACK Error: Command {msgID.command} {ACK_RESULTS.get(msgID.result, msgID.result)}")
 
     takeoff(ALTITUDE_M)
     msgID = wait_for_msg()
     if msgID is not None:
-        raise RuntimeError("ACK Error: Command ", ACK_RESULTS.get(msgID, msgID))
+        print("***** Error encountered *****")
+        change_mode("LAND")
+        raise RuntimeError(f"ACK Error: Command {msgID.command} {ACK_RESULTS.get(msgID.result, msgID.result)}")
 
 
     home = get_local_xy(timeout=2.0)
@@ -289,8 +295,8 @@ if __name__ == "__main__":
     print("Turning Around...")
     turn_relative_stable(180)
 
-    print("Moving South 5 meters")
-    move_by_offset_local(+5,0)
+    print("Moving South 10 meters")
+    move_by_offset_local(-10,0)
 
     currentLocation = get_local_xy(timeout=2.0)
     currentLocation_x, currentLocation_y = currentLocation
