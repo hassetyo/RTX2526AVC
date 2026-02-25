@@ -240,7 +240,7 @@ def read_messages():
 
 #return the error message, if there is one
 def wait_for_msg():
-    end = time.time() + 3
+    end = time.time() + 5
     while time.time() < end:
         msgID = read_messages()
         time.sleep(0.05)
