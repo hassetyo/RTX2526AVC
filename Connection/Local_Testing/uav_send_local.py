@@ -42,12 +42,14 @@ def get_local(master):
     return msg.x, msg.y, msg.z
 
 def send_setpoint(master, x, y, z):
+    time_boot_ms = int(time.monotonic() * 1000) & 0xFFFFFFFF
+
     master.mav.set_position_target_local_ned_send(
-        int(time.time() * 1000),
+        time_boot_ms,
         master.target_system,
         master.target_component,
         mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-        0b0000111111111000,
+        0b0000111111111000,   # position enabled, velocity/accel/yaw ignored
         x, y, z,
         0, 0, 0,
         0, 0, 0,
