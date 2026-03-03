@@ -1,0 +1,53 @@
+######### drone mission template
+
+# use this file as a starter whenever you want to make a new mission script
+# it has all the sync radio and bridge stuff already setup for you
+import time # need this so we dont spam the cpu and can wait for stuff
+import v2v_bridge # this is the translator that handles the messy binary packing
+from pymavlink import mavutil # only bring this in if you actually need to look at the drone stats
+
+# where the physical hardware is actually plugged into the board
+ESP32_PORT = "/dev/ttyUSB0" # this is where the esp32 radio box is plugged in
+DRONE_PORT = "/dev/ttyACM0" # this is the main drone flight controller wire
+
+def main(): # the main boss function that runs the whole show
+    # step 1 is to start up the radio bridge link so they can talk
+    print("STARTING MISSION") # just printing out that we are kicking things off
+    bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="Mission Brain") # creating the bridge object and giving it a name
+    try: # trying to connect without crashing the whole script
+        bridge.connect() # actually opening the serial port to the radio box
+        bridge.send_message("NEW MISSION STARTING") # sending the very first hello over the air
+    except: return # if it fails just bail out and stop everything
+
+    # step 2 is to sync up with the ground rover
+    # we really dont want to start shouting commands if the robot is ghosting us or dead
+    ugv_ready = False # setting the flag to false to start our wait loop
+    while not ugv_ready: # keep looping until the rover actually talks back to us
+        data = bridge.get_telemetry() # hunt through the radio traffic for the rover status
+        if data: # if we actually got a real packet and not just garbage
+            # unpacking the structs we get seq time speed armed state and safety bits
+            print(f"UGV FOUND Status Armed={data[4]}") # print out that we found it and if it is armed
+            ugv_ready = True # flip the flag so we can break out of the sync loop
+        time.sleep(1.0) # sleep for a bit so we dont melt the cpu while waiting
+
+    # step 3 is to actually do the chores
+    # this is where you put your actual mission logic and tell it what to do
+
+    # for example we are going to send a move command
+    print("Sending move command") # letting the terminal know we are bullying it to move
+    # sending sequence id 999 to move forward and making sure emergency stop is 0
+    bridge.send_command(cmdSeq=999, cmd=v2v_bridge.CMD_MOVE_FORWARD, estop=0) # shoving the actual command into the translator
+
+    # now we do a loop just to watch the robot move and see its speed
+    start_t = time.time() # grabbing the current clock time to start our timer
+    while (time.time() - start_t) < 5.0: # keep doing this loop for exactly 5 seconds
+        data = bridge.get_telemetry() # catch the latest telemetry packet from the radio
+        if data: # checking again to make sure it is not empty garbage
+            print(f"Robot Speed {data[2]:.2f} m/s", end='\r') # print the speed and overwrite the line so it looks clean
+        time.sleep(0.5) # pause for half a second before asking for the speed again
+
+    print("\nMISSION COMPLETE") # print that we are totally done with the chores
+    bridge.stop() # close the serial port and shut down the radio bridge cleanly
+
+if __name__ == "__main__":
+    main()

@@ -5,7 +5,7 @@ import math
 # =========================
 # CONFIG
 # =========================
-CONNECTION_STRING = "udp:127.0.0.1:14551"     # e.g. "COM6" on Windows, or "udp:127.0.0.1:14551" in SITL
+CONNECTION_STRING = 'COM3'     # e.g. "COM6" on Windows, or "udp:127.0.0.1:14551" in SITL
 BAUD_RATE = 57600
 
 TARGET_DISTANCE_M = 5.0
