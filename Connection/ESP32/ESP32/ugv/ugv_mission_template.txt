@@ -1,0 +1,82 @@
+######### ugv ground station template
+
+# use this script as a starter for the raspberry pi ground station
+# it has the hybrid arming and radio status logic already baked in
+from dronekit import connect, VehicleMode # needed to bully the pixhawk
+import time # for timing and loop sleeps
+import math # for turning math
+import v2v_bridge # the translator for the radio box
+from pymavlink import mavutil # for sending raw movement pulses
+
+# where the hardware is actually plugged into the pi
+UGV_CONTROL_PORT = "/dev/ttyACM0"   # the main pixhawk usb wire
+ESP32_BRIDGE_PORT = "/dev/ttyUSB0"  # the esp32 radio bridge usb wire
+
+# mission settings
+SPEED_MPS = 1.6      # how much juice to give the motors
+TELEM_SEND_HZ = 5    # how many times per second to tell the drone where we are
+
+# step 1 is to connect to the actual robot brain
+print("CONNECTING TO UGV") # just a log
+try:
+    vehicle = connect(UGV_CONTROL_PORT, wait_ready=True, baud=115200) # opening the link
+    print("CONNECTED TO PIXHAWK") # success
+except Exception as e:
+    print(f"FAILED TO CONNECT {e}") # bail out if hardware is missing
+    exit()
+
+def broadcast_status(bridge, seq): # function to shout stats at the drone
+    armed_val = 1 if vehicle.armed else 0 # check if motors are live
+    m = vehicle.mode.name # check current mode
+    
+    # packing safety flags like GPS lock and armable status into one byte
+    armable_bit = 0x10 if vehicle.is_armable else 0x00
+    gps_bit = 0x20 if (vehicle.gps_0.fix_type > 0) else 0x00
+    safety_byte = armable_bit | gps_bit # merging the bits
+    
+    t_ms = int(time.time() * 1000) & 0xFFFFFFFF # current clock time
+    v_mps = vehicle.groundspeed if vehicle.groundspeed is not None else 0.0 # how fast we moving
+    
+    # ship the telemetry down the usb wire to the radio box
+    bridge.send_telemetry(seq, t_ms, v_mps, 0.0, armed_val, safety_byte)
+
+def arm_and_move(bridge): # the hybrid arming sequence to bypass GPS checks
+    print("INITIATING HYBRID ARM") # starting the hack
+    # force arming in manual mode then flipping to guided
+    for attempt in ["ARM", "DISARM", "ARM"]: # toggling state to wake up pixhawk
+        state = True if attempt == "ARM" else False # check state
+        vehicle.armed = state # tell the robot to change
+        time.sleep(1.0) # wait for hardware to catch up
+    
+    vehicle.mode = VehicleMode("GUIDED") # force into guided mode for code control
+    print("ROBOT ARMED AND READY") # finished the hack
+
+def main(): # the main boss function
+    bridge = v2v_bridge.V2VBridge(ESP32_BRIDGE_PORT, name="UGV Bridge") # setup bridge
+    try:
+        bridge.connect() # open the radio usb wire
+        bridge.send_message("GROUND STATION CONNECTED") # say hello to the drone
+    except: return # exit if radio is missing
+
+    seq = 0 # status counter
+    while True: # loop forever
+        broadcast_status(bridge, seq) # tell the drone we are alive
+        seq += 1 # increment counter
+
+        # check if the drone gave us a mission command
+        cmd = bridge.get_command() # check the radio mailbox
+        if cmd: # if we got a real instruction
+            cmdSeq, cmdVal, eStop = cmd # unpack the command
+            print(f"GOT COMMAND {cmdVal}") # log it
+            
+            if not vehicle.armed: arm_and_move(bridge) # arm it if we havent yet
+            
+            # add your mission logic here
+            # for example: drive forward
+            if cmdVal == v2v_bridge.CMD_MOVE_FORWARD:
+                print("DRIVING FORWARD") # just a log
+
+        time.sleep(1.0 / TELEM_SEND_HZ) # wait for next loop cycle
+
+if __name__ == "__main__":
+    main()
