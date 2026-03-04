@@ -12,6 +12,7 @@ DIST_M = 3.048        # move ~10 ft
 SPEED_MPS = 0.2       # speed magnitude
 TAKEOFF_ALT_M = 3.0   # hover height
 MAX_ALT_ALLOWED = 3.5 # safety ceiling
+RETURN_SPEED_MPS = 0.15   # slow return speed
 
 print(f"[Mission] Connecting to {CONNECTION_STRING}...")
 master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE)
@@ -123,38 +124,54 @@ def main():
             time.sleep(0.1)
 
         # step 4: return to original point (LOCAL NED position hold)
-        print("[Mission] Returning to start position...")
-        cur_pos = master.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=2.0)
-        if not cur_pos:
+        print("[Mission] Returning to start position (slow)...")
+
+        # read current position once
+        p0 = master.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=2.0)
+        if not p0:
             raise RuntimeError("Could not read LOCAL_POSITION_NED before return.")
-        cur_z = float(cur_pos.z)
+        cur_x, cur_y, cur_z = float(p0.x), float(p0.y), float(p0.z)
 
         type_mask = 0b0000111111111000  # position enabled; vel/accel ignored; yaw/yaw_rate ignored
+        dt = 0.2                        # command rate
+        step = RETURN_SPEED_MPS * dt    # meters per step
+        return_deadline = time.time() + 60.0
 
-        return_deadline = time.time() + 50.0
         while time.time() < return_deadline:
+            # compute vector to start
+            dx = start_x - cur_x
+            dy = start_y - cur_y
+            dist_back = math.hypot(dx, dy)
+
+            print(f"[Mission] return dist: {dist_back:.2f} m")
+
+            if dist_back < 0.5:
+                print("[Mission] Back at start.")
+                break
+
+            # move commanded point a small step toward start
+            if dist_back > 1e-6:
+                ux = dx / dist_back
+                uy = dy / dist_back
+            else:
+                ux, uy = 0.0, 0.0
+
+            cur_x += ux * min(step, dist_back)
+            cur_y += uy * min(step, dist_back)
+
             time_boot_ms = int(time.monotonic() * 1000) & 0xFFFFFFFF
             master.mav.set_position_target_local_ned_send(
                 time_boot_ms,
                 master.target_system, master.target_component,
                 mavutil.mavlink.MAV_FRAME_LOCAL_NED,
                 type_mask,
-                start_x, start_y, cur_z,
+                cur_x, cur_y, cur_z,
                 0, 0, 0,
                 0, 0, 0,
                 0, 0
             )
 
-            p = master.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=1.0)
-            if p:
-                x, y = float(p.x), float(p.y)
-                dist_back = math.hypot(start_x - x, start_y - y)
-                print(f"[Mission] return dist: {dist_back:.2f} m")
-                if dist_back < 0.5:
-                    print("[Mission] Back at start.")
-                    break
-
-            time.sleep(0.2)
+            time.sleep(dt)
 
         # step 5: land
         print("[Mission] Landing now...")
