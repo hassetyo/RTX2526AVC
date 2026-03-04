@@ -2,17 +2,7 @@ from pymavlink import mavutil # i had to grab mavlink to actually talk to the dr
 import time # i imported time for timing and loop sleeps so the cpu doesnt completely melt
 import math # i added math for doing boring degree to radian math
 
-# uav flight and ugv script
-# i made this flight test script where the drone takes off
-# and bosses the ground rover around to move while it flies
 
-################################# config stuff i setup
-# where i physically plugged in the flight controller and radio
-CONNECTION_STRING = "/dev/ttyACM0" # the actual wire for the drone controller
-BAUD_RATE = 115200 # the serial wire speed i picked
-
-# the uav radio box port i set
-ESP32_PORT = "/dev/ttyUSB0"
 
 # mission params i tuned
 DIST_M = 3.048       # the 10 ft move target cause imperial units are annoying
@@ -20,13 +10,41 @@ SPEED_MPS = 0.5      # slow and steady wins the race so it doesnt crash
 TAKEOFF_ALT_M = 2.0  # the target height i want it to hover at
 MAX_ALT_ALLOWED = 3.5 # safety fence height around 11 ft so it doesnt hit the ceiling
 
+ACK_RESULTS = {
+    0: "ACCEPTED",
+    1: "TEMPORARILY_REJECTED",
+    2: "DENIED",
+    3: "UNSUPPORTED",
+    4: "FAILED",
+    5: "IN_PROGRESS",
+}
+
+# this is a way to go from simulation testing to irl testing
+
+#False if irl testing
+#True if simulation testing
+USE_SITL = False
+
+if USE_SITL:
+    CONNECTION_STRING = "udp:127.0.0.1:14551"   
+    print(f"Connecting to SITL on {CONNECTION_STRING}")
+    master = mavutil.mavlink_connection(CONNECTION_STRING)
+else:
+    # --- MINIMAL CHANGES FOR JETSON NANO ---
+    # If using USB cable, use "/dev/ttyACM0"
+    # If using GPIO Pins (8/10), use "/dev/ttyTHS1"
+    CONNECTION_STRING = "/dev/ttyACM0" 
+    BAUD_RATE = 115200
+    # the uav radio box port i set
+    ESP32_PORT = "/dev/ttyUSB0"
+    print(f"[Mission 2] Connecting to {CONNECTION_STRING}...") # logging that i am trying to connect
+    master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE) # actually opening the mavlink link i setup
+
+
 # time to start the drone brain connection
-print(f"[Mission 2] Connecting to {CONNECTION_STRING}...") # logging that i am trying to connect
-master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE) # actually opening the mavlink link i setup
 master.wait_heartbeat() # waiting forever for the drone to say hello
 print("[Mission 2] Heartbeat found. Optical Flow/Lidar Ready.") # checking if it was a success
 
-# i initialize the radio link translator here
 
 ############################ the mavlink helpers i wrote
 
