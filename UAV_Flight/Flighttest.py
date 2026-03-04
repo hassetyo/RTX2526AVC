@@ -54,6 +54,19 @@ def takeoff(alt):
         0, 0,
         alt
     )
+    # Reinforce the climb with an explicit position target (NED: z is negative = up)
+    time.sleep(0.5)
+    time_boot_ms = int(time.monotonic() * 1000) & 0xFFFFFFFF
+    master.mav.set_position_target_local_ned_send(
+        time_boot_ms,
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+        0b0000111111111000,  # position only
+        0, 0, -alt,          # z = -alt because NED up is negative
+        0, 0, 0,
+        0, 0, 0,
+        0, 0
+    )
 
 def get_altitude():
     # RELATIVE altitude above home (meters)
@@ -84,13 +97,12 @@ def main():
         change_mode("GUIDED")
         time.sleep(1)
         arm_drone()
-        time.sleep(2)  # wait for motors to spool up before sending takeoff
+        time.sleep(1)
         takeoff(TAKEOFF_ALT_M)
 
         print("Climbing...")
         while True:
             alt = get_altitude()
-            print(f"[Climb] alt: {alt:.2f}m")
             if alt >= TAKEOFF_ALT_M * 0.9:
                 print(f"Altitude reached: {alt:.2f}m")
                 break
