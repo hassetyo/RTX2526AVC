@@ -35,6 +35,18 @@ def change_mode(mode: str):
     )
     print(f"Mode set: {mode}")
 
+    # Wait for mode confirmation via HEARTBEAT
+    timeout = time.time() + 5.0
+    while time.time() < timeout:
+        msg = master.recv_match(type='HEARTBEAT', blocking=True, timeout=1.0)
+        if msg:
+            current_mode = mavutil.mode_string_v10(msg)
+            if current_mode == mode:
+                print(f"Mode confirmed: {mode}")
+                return
+        time.sleep(0.2)
+    print(f"Warning: mode confirmation timed out for {mode}, continuing anyway.")
+
 def arm_drone():
     master.mav.command_long_send(
         master.target_system, master.target_component,
@@ -43,6 +55,20 @@ def arm_drone():
         1, 0, 0, 0, 0, 0, 0
     )
     print("Arming...")
+
+    # Wait for arming confirmation via HEARTBEAT
+    print("Waiting for arm confirmation...")
+    timeout = time.time() + 10.0
+    while time.time() < timeout:
+        msg = master.recv_match(type='HEARTBEAT', blocking=True, timeout=1.0)
+        if msg and (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+            print("Armed confirmed.")
+            # Let motors spool up to idle before takeoff command
+            print("Motors spooling up (2s)...")
+            time.sleep(2.0)
+            return
+        time.sleep(0.2)
+    raise RuntimeError("Drone failed to arm within timeout.")
 
 def takeoff(alt):
     print(f"Takeoff command: {alt}m")
@@ -54,6 +80,18 @@ def takeoff(alt):
         0, 0,
         alt
     )
+
+    # Wait for ACK to confirm the takeoff command was accepted
+    timeout = time.time() + 5.0
+    while time.time() < timeout:
+        ack = master.recv_match(type='COMMAND_ACK', blocking=True, timeout=1.0)
+        if ack and ack.command == mavutil.mavlink.MAV_CMD_NAV_TAKEOFF:
+            if ack.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                print("Takeoff command accepted.")
+            else:
+                print(f"Takeoff ACK result: {ack.result} (non-accepted, check pre-arm conditions)")
+            return
+    print("Warning: No takeoff ACK received, proceeding anyway.")
 
 def get_altitude():
     # RELATIVE altitude above home (meters)
@@ -83,17 +121,23 @@ def main():
         # step 1: takeoff
         change_mode("GUIDED")
         time.sleep(1)
-        arm_drone()
-        time.sleep(1)
+        arm_drone()          # now waits for confirmed arm + spool-up delay
         takeoff(TAKEOFF_ALT_M)
 
         print("Climbing...")
-        while True:
+        # Give motors time to actually spin up to full throttle
+        time.sleep(1.0)
+
+        timeout = time.time() + 30.0  # don't wait forever
+        while time.time() < timeout:
             alt = get_altitude()
+            print(f"[Climb] Current alt: {alt:.2f}m / target {TAKEOFF_ALT_M * 0.9:.2f}m")
             if alt >= TAKEOFF_ALT_M * 0.9:
                 print(f"Altitude reached: {alt:.2f}m")
                 break
             time.sleep(0.5)
+        else:
+            raise RuntimeError("Timed out waiting to reach takeoff altitude.")
 
         # record start position in LOCAL NED
         start_pos = master.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=2.0)
