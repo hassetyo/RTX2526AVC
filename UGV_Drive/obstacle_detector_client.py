@@ -1,21 +1,3 @@
-"""
-obstacle_detector_client.py
-
-- Uses webcam + YOLOv8 obstacle detection (center corridor heuristic)
-- Sends a TCP message to rover script when obstacle detected
-- Handshake:
-    Detector -> "OBSTACLE <name>\n"
-    Rover    -> "ACK\n"
-    Rover    -> "DONE\n"
-- Detector PAUSES inference after ACK, and resumes after DONE.
-- Includes a "clear-frames" lockout to avoid immediate re-trigger.
-
-Run (webcam):
-  python obstacle_detector_client.py --source webcam --webcam-index 0 --rover-host 127.0.0.1 --rover-port 5005
-
-Press 'q' to quit.
-"""
-
 import argparse
 import time
 import socket
@@ -31,32 +13,47 @@ class Camera:
         self.width = width
         self.height = height
 
-        self.zed = None
         self.cap = None
+        self.device = None
+        self.q_rgb = None
+        self.pipeline = None
+        self.dai = None
 
-        if self.source == "zed":
-            self._init_zed()
+        if self.source == "oak":
+            self._init_oak()
         elif self.source == "webcam":
             self._init_webcam(webcam_index)
         else:
-            raise ValueError("source must be 'zed' or 'webcam'")
+            raise ValueError("source must be 'oak' or 'webcam'")
 
-    def _init_zed(self):
-        print("[INFO] Initializing ZED camera...")
-        import pyzed.sl as sl
-        self.sl = sl
+    def _init_oak(self):
+        print("[INFO] Initializing OAK-D-Lite...")
+        import depthai as dai
+        self.dai = dai
 
-        self.zed = sl.Camera()
-        init_params = sl.InitParameters()
-        init_params.camera_resolution = sl.RESOLUTION.HD720
-        init_params.depth_mode = sl.DEPTH_MODE.NONE
+        pipeline = dai.Pipeline()
 
-        status = self.zed.open(init_params)
-        if status != sl.ERROR_CODE.SUCCESS:
-            raise RuntimeError(f"Failed to open ZED camera: {status}")
+        cam_rgb = pipeline.create(dai.node.ColorCamera)
+        xout_rgb = pipeline.create(dai.node.XLinkOut)
 
-        self.zed_image = sl.Mat()
-        print("[INFO] ZED camera ready.")
+        xout_rgb.setStreamName("rgb")
+
+        # OAK-D-Lite color stream settings
+        cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+        cam_rgb.setInterleaved(False)
+        cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+
+        # Send a resized preview for OpenCV/YOLO
+        cam_rgb.setPreviewSize(self.width, self.height)
+        cam_rgb.setFps(30)
+
+        cam_rgb.preview.link(xout_rgb.input)
+
+        self.pipeline = pipeline
+        self.device = dai.Device(self.pipeline)
+        self.q_rgb = self.device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
+
+        print("[INFO] OAK-D-Lite ready.")
 
     def _init_webcam(self, webcam_index: int):
         print("[INFO] Initializing webcam...")
@@ -69,12 +66,15 @@ class Camera:
         print("[INFO] Webcam ready.")
 
     def read(self):
-        if self.source == "zed":
-            if self.zed.grab() != self.sl.ERROR_CODE.SUCCESS:
+        if self.source == "oak":
+            if self.q_rgb is None:
                 return None
-            self.zed.retrieve_image(self.zed_image, self.sl.VIEW.LEFT)
-            frame = self.zed_image.get_data()  # BGRA
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
+            in_rgb = self.q_rgb.tryGet()
+            if in_rgb is None:
+                return None
+
+            frame = in_rgb.getCvFrame()
             return frame
 
         ret, frame = self.cap.read()
@@ -83,10 +83,10 @@ class Camera:
         return frame
 
     def close(self):
-        if self.zed is not None:
-            self.zed.close()
         if self.cap is not None:
             self.cap.release()
+        if self.device is not None:
+            self.device.close()
 
 # -----------------------------
 # YOLOv8 Detector
@@ -174,7 +174,7 @@ def tcp_connect(host: str, port: int, timeout_s: float = 5.0) -> socket.socket:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout_s)
     s.connect((host, port))
-    s.settimeout(None)  # blocking afterwards
+    s.settimeout(None)
     return s
 
 def recv_line(sock: socket.socket) -> str:
@@ -198,18 +198,20 @@ def send_line(sock: socket.socket, line: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", choices=["zed", "webcam"], default="webcam")
+    parser.add_argument("--source", choices=["oak", "webcam"], default="oak")
     parser.add_argument("--webcam-index", type=int, default=0)
-    parser.add_argument("--model", default="yolov8n.pt")
-    parser.add_argument("--conf", type=float, default=0.35)
+    parser.add_argument("--model", default="yolov8s.pt")
+    parser.add_argument("--conf", type=float, default=0.15)
     parser.add_argument("--corridor-width", type=float, default=0.35)
     parser.add_argument("--min-area", type=float, default=0.02)
     parser.add_argument("--maxfps", type=float, default=15.0)
 
+    parser.add_argument("--width", type=int, default=1280)
+    parser.add_argument("--height", type=int, default=720)
+
     parser.add_argument("--rover-host", default="127.0.0.1")
     parser.add_argument("--rover-port", type=int, default=5005)
 
-    # Avoid immediate retrigger: require N consecutive "CLEAR" frames after DONE
     parser.add_argument("--clear-frames", type=int, default=12)
 
     args = parser.parse_args()
@@ -218,7 +220,12 @@ def main():
     sock = tcp_connect(args.rover_host, args.rover_port)
     print("[NET] Connected.")
 
-    cam = Camera(source=args.source, webcam_index=args.webcam_index)
+    cam = Camera(
+        source=args.source,
+        webcam_index=args.webcam_index,
+        width=args.width,
+        height=args.height
+    )
     det = YOLODetector(model_name=args.model, conf=args.conf)
 
     cv2.namedWindow("Obstacle Detection", cv2.WINDOW_NORMAL)
@@ -227,11 +234,10 @@ def main():
     frame_interval = 1.0 / max(1e-6, args.maxfps)
 
     paused = False
-    need_clear = 0  # how many clear frames still required before re-arming trigger
+    need_clear = 0
 
     try:
         while True:
-            # FPS limiting
             now = time.time()
             if now - last_time < frame_interval:
                 time.sleep(0.001)
@@ -240,12 +246,10 @@ def main():
 
             frame = cam.read()
             if frame is None:
-                print("[WARN] No frame received.")
                 continue
 
             if paused:
-                # While paused, we still show video, but do not run YOLO inference
-                out = draw_overlay(frame, [], is_obstacle=False, corridor_bounds=(0, 0), paused=True)
+                out = draw_overlay(frame, [], is_obstacle=False, corridor_bounds=(0, frame.shape[1]), paused=True)
                 cv2.imshow("Obstacle Detection", out)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
@@ -253,16 +257,15 @@ def main():
 
             detections = det.detect(frame)
             is_obs, corridor_bounds, obstacle_name = obstacle_in_path(
-                detections, frame.shape,
+                detections,
+                frame.shape,
                 corridor_width_ratio=args.corridor_width,
                 min_area_ratio=args.min_area
             )
 
-            # Manage re-arm / clear frames lockout
             if need_clear > 0:
                 if not is_obs:
                     need_clear -= 1
-                # Even if obstacle is still there, we do not trigger until cleared enough
                 is_trigger_allowed = (need_clear <= 0)
             else:
                 is_trigger_allowed = True
@@ -272,25 +275,18 @@ def main():
 
             if is_obs and is_trigger_allowed:
                 print(f"[DETECT] OBSTACLE: {obstacle_name}. Sending to rover...")
-
-                # Send obstacle message
                 send_line(sock, f"OBSTACLE {obstacle_name}")
 
-                # Wait for ACK
                 msg = recv_line(sock)
                 if msg != "ACK":
                     print(f"[NET] Unexpected reply (expected ACK): {msg}")
                 else:
                     print("[NET] Rover ACK received. Pausing detection until DONE...")
 
-                # Pause inference while rover maneuvers
                 paused = True
-
-                # Wait for DONE
                 done = recv_line(sock)
                 print(f"[NET] Rover says: {done}")
 
-                # Resume detection + require several CLEAR frames before triggering again
                 paused = False
                 need_clear = args.clear_frames
 
