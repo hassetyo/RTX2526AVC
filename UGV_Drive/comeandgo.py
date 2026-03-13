@@ -67,41 +67,6 @@ def arm():
         0,
         1, 0, 0, 0, 0, 0, 0
     )
-    print("Arming sent...")
-    time.sleep(2)
-def send_velocity(vx, yaw_rate, duration):
-    """
-    vx: forward velocity (m/s)
-    yaw_rate: yaw rate (rad/s)
-    duration: seconds
-    """
-
-    type_mask = (
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE |
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE |
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_Z_IGNORE |
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE |
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE |
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE |
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
-    )
-
-    steps = int(duration / 0.1)
-
-    for _ in range(steps):
-        master.mav.set_position_target_local_ned_send(
-            0,
-            master.target_system,
-            master.target_component,
-            mavutil.mavlink.MAV_FRAME_BODY_NED,
-            type_mask,
-            0, 0, 0,      # position (ignored)
-            vx, 0, 0,     # velocity (forward only)
-            0, 0, 0,      # acceleration (ignored)
-            0,            # yaw (ignored)
-            yaw_rate      # yaw rate (rad/s)
-        )
-        time.sleep(0.1)
     time.sleep(2.0)
 
 def disarm():
@@ -266,25 +231,14 @@ def turn_in_place(relative_angle_deg: float):
 if __name__ == "__main__":
     try:
         change_mode("GUIDED")
-        change_mode("GUIDED")
         arm()
         time.sleep(2)
 
-        print(">>> MOVING FORWARD <<<")
-        send_velocity(vx=1.0, yaw_rate=0.0, duration=5)
-
-        print(">>> TURNING RIGHT ~180 <<<")
-        send_velocity(vx=0.8, yaw_rate=-0.6, duration=4)
         print(">>> STEP 1: MOVE FORWARD 1.0 m <<<")
         move_forward_distance_smart(TARGET_DISTANCE_M, SPEED_MPS)
 
         time.sleep(1)
 
-        print(">>> MOVING FORWARD AGAIN <<<")
-        send_velocity(vx=1.0, yaw_rate=0.0, duration=5)
-
-        print("Stopping...")
-        send_velocity(0, 0, 1)
         print("\n>>> STEP 2: TURN IN PLACE <<<")
         turn_in_place(TURN_ANGLE_DEG)
 
@@ -303,8 +257,6 @@ if __name__ == "__main__":
             pass
 
     finally:
-        disarm()
-        print("Test Complete.")
         try:
             stop_vehicle()
             time.sleep(1)
