@@ -112,6 +112,24 @@ def disarm_drone(master): # stops the motors securely
     )
     print("Disarmed.") # log the safety
 
+# EMERGENCY: Forces the motors to stop immediately. The drone will drop like a stone.
+def hard_disarm(master):
+    """
+    EMERGENCY ONLY: Forces the motors to stop immediately.
+    The drone will drop like a stone.
+    """
+    master.mav.command_long_send(
+        master.target_system, 
+        master.target_component,
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 
+        0, # Confirmation
+        0, # 0 to Disarm
+        21196, # Magic number to force disarm even if not on the ground (ArduPilot specific)
+        0, 0, 0, 0, 0
+    )
+    log_event("!!! HARD DISARM SENT: MOTORS STOPPED !!!")
+
+
 def main(): # main mission boss engine
     log_event("--- MISSION 1 STARTING: WORKING MAVLINK PATTERN ---")
     
@@ -241,21 +259,34 @@ def main(): # main mission boss engine
             
             time.sleep(0.1) # 10hz loop
         
-        # step 5: land and shutdown
-        print("\nLanding sequence engaged...") # start descent
-        change_mode(master, "LAND") # switch to official land mode for graceful touchdown
-        set_throttle(master, 0) # release throttle override so autopilot takes over
+        # Step 5: Land and shutdown
+        log_event("Landing sequence engaged...") 
+        change_mode(master, "LAND") 
+        clear_overrides(master) # Let autopilot take the wheel
 
-        while True: # loop until we hit the floor
-            alt = get_lidar_alt(master) # check lidar
-            print(f" Land Alt: {alt:.2f}m", end='\r') # log altitude
+        landing_start_time = time.time()
+        LANDING_TIMEOUT = 15 # Give it 15 seconds to find the ground
+        
+        while True:
+            alt = get_lidar_alt(master)
+            elapsed = time.time() - landing_start_time
+            print(f" Land Alt: {alt:.2f}m | Timer: {elapsed:.1f}s", end='\r')
             
-            # checking if the drone disarmed itself (autopilot does this after landing)
+            # Check for automatic disarm (Autopilot logic)
             msg = master.recv_match(type='HEARTBEAT', blocking=False)
-            if msg and not (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
-                print("\nTouchdown confirmed. Motors stopped.") # log success
-                break # exit
-            time.sleep(0.5) # slower loop for checking
+            is_armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED if msg else True
+            
+            if msg and not is_armed:
+                log_event("\nTouchdown confirmed. Motors stopped naturally.")
+                break
+            
+            # EMERGENCY: If landing takes too long, force it.
+            if elapsed > LANDING_TIMEOUT:
+                log_event("\n[!] Landing Timeout: Forcing Disarm for safety.")
+                hard_disarm(master) # Force the motors off
+                break
+                
+            time.sleep(0.5)
 
     except KeyboardInterrupt:
         log_event("[!] Emergency: User Triggered Landing Sequence.")
