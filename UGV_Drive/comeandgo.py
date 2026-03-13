@@ -8,8 +8,8 @@ import math
 CONNECTION_STRING = 'COM3'   # Use 'udp:127.0.0.1:14551' for SITL, or 'COM3' for telemetry radio
 BAUD_RATE = 57600
 
-TARGET_DISTANCE_M = 1.0
-SPEED_MPS = 0.4
+TARGET_DISTANCE_M = 1.524 # 5 feet in meters; change if you want a different distance
+SPEED_MPS = 0.09 #0.2 mph
 
 # Turn-in-place settings
 TURN_ANGLE_DEG = 180         # change if you want a different turn
@@ -239,8 +239,8 @@ if __name__ == "__main__":
 
         time.sleep(1)
 
-        print("\n>>> STEP 2: TURN IN PLACE <<<")
-        turn_in_place(TURN_ANGLE_DEG)
+        #print("\n>>> STEP 2: TURN IN PLACE <<<")
+        #turn_in_place(TURN_ANGLE_DEG)
 
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
