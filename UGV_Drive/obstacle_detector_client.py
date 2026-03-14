@@ -200,7 +200,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", choices=["oak", "webcam"], default="oak")
     parser.add_argument("--webcam-index", type=int, default=0)
-    parser.add_argument("--model", default="yolov8s.pt")
+    parser.add_argument("--model", default="best.pt")
     parser.add_argument("--conf", type=float, default=0.15)
     parser.add_argument("--corridor-width", type=float, default=0.35)
     parser.add_argument("--min-area", type=float, default=0.02)
