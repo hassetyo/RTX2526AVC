@@ -3,7 +3,7 @@ import numpy as np
 import depthai as dai
 from akida import Model, devices
 
-# This code runs obstacle detection on UGV using Oak D Lite camera and BrainChip Akida Model
+# This code runs obstacle detection on UGV using Oak D Lite camera and BrainChip AKD1000 M.2 Card
 MODEL_PATH = "/home/raspberry/Desktop/UGVCode/akida_model.fbz"
 INPUT_W = 224
 INPUT_H = 224
