@@ -9,7 +9,8 @@ try:
 except ImportError:
     LGPIOFactory = None
 
-
+# This script moves the ugv forwards 5ft at 0.2 mph
+# If an obstacle is detected within 1 ft, it executes a simple avoidance path: right 90 deg, forward 3 ft, left 90 deg, forward 3 ft, left 90 deg, forward 3 ft, right 90 deg, forward 3 ft
 UGV_CONTROL_PORT = "/dev/ttyACM0"
 BAUD_RATE = 115200
 

@@ -2,7 +2,7 @@ from dronekit import connect, VehicleMode
 from pymavlink import mavutil
 import time
 
-
+# This script moves the ugv forwards 5ft at 0.2 mph
 UGV_CONTROL_PORT = "/dev/ttyACM0"
 BAUD_RATE = 115200
 

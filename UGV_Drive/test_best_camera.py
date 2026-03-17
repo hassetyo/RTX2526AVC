@@ -3,7 +3,7 @@ import cv2
 
 # run with: source .venv/bin/activate
 # python3 test_best_camera.py --source webcam --model best.pt
-
+# This script tests the best.pt model (cones, buckets, cardboard boxes)
 class Camera:
     def __init__(self, source: str, webcam_index: int = 0, width: int = 1280, height: int = 720):
         self.source = source.lower()
