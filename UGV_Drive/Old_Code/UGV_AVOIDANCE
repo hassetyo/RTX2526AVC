@@ -1,0 +1,315 @@
+import time
+import math
+import argparse
+import cv2
+from dronekit import connect, VehicleMode
+from pymavlink import mavutil
+
+# ==========================================
+# UGV CONTROL MECHANICS (From Script 2)
+# ==========================================
+
+UGV_CONTROL_PORT = "/dev/ttyACM0"   # The Pixhawk/Cube connection
+SPEED_MPS = 1.0                     # m/s target speed for normal driving
+
+def arm_and_sync(vehicle): 
+    # forces the UGV to arm in GUIDED mode
+    print("\n[Ground] >>> INITIATING HYBRID ARM SEQUENCE")
+    if not vehicle.is_armable: 
+        print(f"!!! [WARNING] PRE-ARM CHECKS FAILED (GPS: {vehicle.gps_0.fix_type}) !!!")
+    
+    # aggressive arm-disarm-arm sequence to wake up the Pixhawk
+    for attempt in ["FIRST ARM", "RESET DISARM", "FINAL ARM"]: 
+        state = True if "ARM" in attempt else False 
+        print(f"  [FORCE-SYNC] Initiating {attempt} in {vehicle.mode.name} mode...") 
+        for retry in range(3): 
+            vehicle.armed = state 
+            timeout = time.time() + 3 
+            while vehicle.armed != state: 
+                if time.time() > timeout: break 
+                time.sleep(0.1) 
+            if vehicle.armed == state: break 
+        time.sleep(1.0) 
+
+    if not vehicle.armed: 
+        print("!!! [ERROR] FAILED TO ARM !!!")
+        return False
+
+    # switch to GUIDED mode so it takes local NED commands
+    print(f"  [MODE] Switching {vehicle.mode.name} -> GUIDED...") 
+    vehicle.mode = VehicleMode("GUIDED") 
+    m_timeout = time.time() + 5 
+    while vehicle.mode.name != "GUIDED" and time.time() < m_timeout: 
+        time.sleep(0.1) 
+    
+    print("!!! UGV FULLY ARMED AND READY !!!\n")
+    return True
+
+def stop_ugv(vehicle):
+    # hard stop
+    stop_msg = vehicle.message_factory.set_position_target_local_ned_encode( 
+        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0b0000111111111111, 
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) 
+    vehicle.send_mavlink(stop_msg) 
+
+def execute_drive(vehicle, distance_m): 
+    # drives forward a specific distance
+    print(f"[Ground] DRIVE: {distance_m}m at {SPEED_MPS}m/s") 
+    msg = vehicle.message_factory.set_position_target_local_ned_encode( 
+        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0b0000111111000111, 
+        0, 0, 0, SPEED_MPS, 0, 0, 0, 0, 0, 0, 0) 
+    
+    start_t = time.time() 
+    duration = distance_m / SPEED_MPS 
+    while (time.time() - start_t) < duration: 
+        vehicle.send_mavlink(msg) 
+        time.sleep(0.1) # 10hz pulse
+    
+    stop_ugv(vehicle)
+    time.sleep(0.5) # let settle
+
+def execute_turn(vehicle, angle_deg): 
+    # spins the ugv in place to a specific relative angle
+    print(f"[Ground] >>> EXECUTING TURN {angle_deg} DEGREES") 
+    yaw_rate = 60 # deg/s speed of pivot
+    direction = 1 if angle_deg > 0 else -1 # 1 = right, -1 = left
+    
+    msg = vehicle.message_factory.set_position_target_local_ned_encode( 
+        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0b0000101111111111, 
+        0, 0, 0, 0, 0, 0, 0, 0, 0, math.radians(yaw_rate * direction), 0) 
+    
+    duration = abs(angle_deg) / yaw_rate 
+    start_t = time.time() 
+    while (time.time() - start_t) < duration: 
+        vehicle.send_mavlink(msg) 
+        time.sleep(0.1) # 10hz pulse
+    
+    stop_ugv(vehicle)
+    time.sleep(1.0) # let settle
+
+def send_forward_velocity(vehicle, speed):
+    # sends a single pulse to keep moving forward (used in main loop)
+    msg = vehicle.message_factory.set_position_target_local_ned_encode( 
+        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0b0000111111000111, 
+        0, 0, 0, speed, 0, 0, 0, 0, 0, 0, 0) 
+    vehicle.send_mavlink(msg)
+
+# ==========================================
+# CAMERA & YOLO LOGIC (From Script 3)
+# ==========================================
+
+class Camera:
+    def __init__(self, source: str, webcam_index: int = 0, width: int = 640, height: int = 480):
+        self.source = source.lower()
+        self.width = width
+        self.height = height
+
+        self.cap = None
+        self.device = None
+        self.q_rgb = None
+        self.pipeline = None
+        self.dai = None
+
+        if self.source == "oak":
+            self._init_oak()
+        elif self.source == "webcam":
+            self._init_webcam(webcam_index)
+        else:
+            raise ValueError("source must be 'oak' or 'webcam'")
+
+    def _init_oak(self):
+        print("[INFO] Initializing OAK-D-Lite...")
+        import depthai as dai
+        self.dai = dai
+        pipeline = dai.Pipeline()
+        cam_rgb = pipeline.create(dai.node.ColorCamera)
+        xout_rgb = pipeline.create(dai.node.XLinkOut)
+        xout_rgb.setStreamName("rgb")
+        
+        cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+        cam_rgb.setInterleaved(False)
+        cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+        cam_rgb.setPreviewSize(self.width, self.height)
+        cam_rgb.setFps(30)
+        cam_rgb.preview.link(xout_rgb.input)
+        
+        self.pipeline = pipeline
+        self.device = dai.Device(self.pipeline)
+        self.q_rgb = self.device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
+        print("[INFO] OAK-D-Lite ready.")
+
+    def _init_webcam(self, webcam_index: int):
+        print("[INFO] Initializing webcam...")
+        self.cap = cv2.VideoCapture(webcam_index)
+        if not self.cap.isOpened():
+            raise RuntimeError("Failed to open webcam.")
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        print("[INFO] Webcam ready.")
+
+    def read(self):
+        if self.source == "oak":
+            if self.q_rgb is None: return None
+            in_rgb = self.q_rgb.tryGet()
+            if in_rgb is None: return None
+            return in_rgb.getCvFrame()
+        ret, frame = self.cap.read()
+        return frame if ret else None
+
+    def close(self):
+        if self.cap is not None: self.cap.release()
+        if self.device is not None: self.device.close()
+
+class YOLODetector:
+    def __init__(self, model_name: str = "yolov8n.pt", conf: float = 0.35):
+        from ultralytics import YOLO
+        print(f"[INFO] Loading model: {model_name}")
+        self.model = YOLO(model_name)
+        self.conf = conf
+
+    def detect(self, frame_bgr):
+        results = self.model.predict(frame_bgr, conf=self.conf, verbose=False)
+        dets = []
+        r0 = results[0]
+        if r0.boxes is None: return dets
+
+        names = r0.names
+        for box in r0.boxes:
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            cls_id = int(box.cls[0].item())
+            conf = float(box.conf[0].item())
+            dets.append({
+                "cls_name": names.get(cls_id, str(cls_id)),
+                "conf": conf,
+                "x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2)
+            })
+        return dets
+
+def obstacle_in_path(detections, frame_shape, corridor_width_ratio=0.35, min_area_ratio=0.02):
+    h, w = frame_shape[:2]
+    img_area = w * h
+    corridor_w = int(w * corridor_width_ratio)
+    cx1 = (w - corridor_w) // 2
+    cx2 = cx1 + corridor_w
+
+    for d in detections:
+        x1, y1, x2, y2 = d["x1"], d["y1"], d["x2"], d["y2"]
+        bbox_area = max(0, x2 - x1) * max(0, y2 - y1)
+        if bbox_area < img_area * min_area_ratio:
+            continue
+
+        overlap_x1 = max(x1, cx1)
+        overlap_x2 = min(x2, cx2)
+        overlap_w = max(0, overlap_x2 - overlap_x1)
+
+        if overlap_w > 0:
+            return True, (cx1, cx2), d["cls_name"]
+
+    return False, (cx1, cx2), None
+
+def draw_overlay(frame, detections, is_obstacle, corridor_bounds, action_text="CLEAR"):
+    h, w = frame.shape[:2]
+    cx1, cx2 = corridor_bounds
+    cv2.rectangle(frame, (cx1, 0), (cx2, h), (255, 255, 255), 2)
+
+    for d in detections:
+        x1, y1, x2, y2 = d["x1"], d["y1"], d["x2"], d["y2"]
+        label = f"{d['cls_name']} {d['conf']:.2f}"
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
+        cv2.putText(frame, label, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+    color = (0, 0, 255) if is_obstacle else (0, 255, 0)
+    cv2.putText(frame, f"STATUS: {action_text}", (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 3)
+    return frame
+
+# ==========================================
+# MAIN EXECUTION LOOP
+# ==========================================
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", choices=["oak", "webcam"], default="webcam")
+    parser.add_argument("--webcam-index", type=int, default=0)
+    parser.add_argument("--model", default="yolov8n.pt") # changed default to standard yolo for easy testing
+    parser.add_argument("--conf", type=float, default=0.35)
+    args = parser.parse_args()
+
+    # 1. Connect to UGV
+    print(f"[Ground] Connecting to UGV at {UGV_CONTROL_PORT}...")
+    try:
+        vehicle = connect(UGV_CONTROL_PORT, wait_ready=True, baud=115200)
+        print("[Ground] Connected!")
+    except Exception as e:
+        print(f"!!! Error connecting to UGV: {e} !!!")
+        return
+
+    if not arm_and_sync(vehicle):
+        vehicle.close()
+        return
+
+    # 2. Setup Camera and AI
+    cam = Camera(source=args.source, webcam_index=args.webcam_index, width=640, height=480)
+    det = YOLODetector(model_name=args.model, conf=args.conf)
+    cv2.namedWindow("UGV Vision", cv2.WINDOW_NORMAL)
+
+    print("\n==========================================")
+    print("   AUTONOMOUS AVOIDANCE MISSION STARTED   ")
+    print("==========================================\n")
+
+    try:
+        while True:
+            frame = cam.read()
+            if frame is None:
+                time.sleep(0.01)
+                continue
+
+            # Run YOLO
+            detections = det.detect(frame)
+            is_obs, corridor_bounds, obstacle_name = obstacle_in_path(detections, frame.shape)
+
+            if is_obs:
+                action_text = f"DODGING: {obstacle_name.upper()}"
+                out = draw_overlay(frame, detections, is_obs, corridor_bounds, action_text)
+                cv2.imshow("UGV Vision", out)
+                cv2.waitKey(1) # force frame update
+
+                print(f"\n[AVOIDANCE] Obstacle detected: {obstacle_name}!")
+                stop_ugv(vehicle)               # 1. Stop immediately
+                time.sleep(0.5)
+                
+                print("[AVOIDANCE] Pivoting Right 90 deg...")
+                execute_turn(vehicle, 90)       # 2. Turn 90 degrees right
+                
+                print("[AVOIDANCE] Driving forward 1.5m to clear...")
+                execute_drive(vehicle, 1.5)     # 3. Drive 5ft/1.5m away
+                
+                # Optional: Turn back towards original path 
+                # execute_turn(vehicle, -90)
+
+                print("[AVOIDANCE] Maneuver complete. Resuming forward path.")
+                
+            else:
+                action_text = "DRIVING FORWARD"
+                # Keep pulsing forward speed to satisfy ArduRover guided mode heartbeat
+                send_forward_velocity(vehicle, SPEED_MPS)
+
+            # Draw and show feed
+            out = draw_overlay(frame, detections, is_obs, corridor_bounds, action_text)
+            cv2.imshow("UGV Vision", out)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("\n[!] User aborted mission via 'q' key.")
+                break
+
+    except KeyboardInterrupt:
+        print("\n[!] Emergency Stop triggered via Ctrl+C.")
+    finally:
+        print("\n[Ground] Shutting down...")
+        stop_ugv(vehicle)
+        vehicle.armed = False
+        vehicle.close()
+        cam.close()
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
