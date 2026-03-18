@@ -4,6 +4,7 @@ import sys # for clean exits
 import v2v_bridge # our custom radio bridge talker
 import cv2 # for aruco detection
 import pyzed.sl as sl # zed 2 sdk on jetson nano
+import numpy as np # for overlay drawing
 
 # uav mission 4 - aruco gate -> takeoff -> aruco land trigger
 # phase 1: scan for aruco on the ground before arming (pre-flight gate)
@@ -93,18 +94,25 @@ def scan_for_marker(cam, detector, timeout=0.0, label=""):
     Scans frames from an already-open ZED camera until a marker is detected.
     timeout=0.0 means wait forever (used for the in-air land trigger).
     timeout>0 means abort after that many seconds (used for preflight gate).
+    Shows a live preview window with green boxes drawn around any detected markers.
     Returns detected marker ID (int) or None on timeout.
     """
     zed_image = sl.Mat()
     scan_start = time.time()
-    print(f"[ArUco{' ' + label if label else ''}] Scanning for marker... {'(timeout: ' + str(timeout) + 's)' if timeout > 0 else '(waiting indefinitely)'}")
+    timeout_str = f"timeout: {timeout}s" if timeout > 0 else "waiting indefinitely"
+    print(f"[ArUco{' ' + label if label else ''}] Scanning for marker... ({timeout_str})")
+
+    # open the preview window for this scan phase
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(WINDOW_NAME, 1280, 720)
 
     while True:
         elapsed = time.time() - scan_start
 
         # only check timeout if one was set
         if timeout > 0 and elapsed >= timeout:
-            print(f"[ArUco] Timeout after {timeout}s. No marker found.")
+            print(f"\n[ArUco] Timeout after {timeout}s. No marker found.")
+            cv2.destroyWindow(WINDOW_NAME)  # close window on timeout
             return None
 
         if cam.grab() == sl.ERROR_CODE.SUCCESS:
@@ -115,14 +123,76 @@ def scan_for_marker(cam, detector, timeout=0.0, label=""):
 
             corners, ids, _ = detector.detectMarkers(gray)
 
+            # build status bar text for the window
+            if ids is not None and len(ids) > 0:
+                id_list = [str(int(ids[i][0])) for i in range(len(ids))]
+                status = f"{label}  DETECTED: ID {', '.join(id_list)}  {elapsed:.1f}s"
+            else:
+                status = f"{label}  Scanning...  {elapsed:.1f}s"
+                if timeout > 0:
+                    status += f"  (abort in {max(0, timeout - elapsed):.0f}s)"
+
+            # draw overlay and push to window
+            display = draw_scan_overlay(frame_bgr, corners, ids, status)
+            cv2.imshow(WINDOW_NAME, display)
+            cv2.waitKey(1)  # must call or window freezes
+
             if ids is not None and len(ids) > 0:
                 detected_id = int(ids[0][0])
                 print(f"\n[ArUco] Marker detected! ID: {detected_id}")
+                # leave window open for a moment so you can see the final detection
+                time.sleep(0.5)
+                cv2.destroyWindow(WINDOW_NAME)
                 return detected_id
 
             print(f"[ArUco] Scanning... {elapsed:.1f}s", end='\r')
 
         time.sleep(0.05)  # ~20fps, easy on the nano
+
+################################# preview window
+
+WINDOW_NAME = "UAV Mission 4 - ArUco Scanner"  # shared window title for both scan phases
+
+def draw_scan_overlay(frame_bgr, corners, ids, status_text):
+    """
+    Draws onto the BGR frame for the live preview window.
+    - Black status bar at the top with current phase and elapsed time
+    - Green bounding box + center crosshair around every detected marker
+    - Red crosshair at the frame center so you can see where to aim the marker
+    Returns the annotated frame ready for cv2.imshow.
+    """
+    display = frame_bgr.copy()
+    h, w = display.shape[:2]
+
+    # red crosshair at the center of the frame - aim the marker here
+    cv2.drawMarker(display, (w // 2, h // 2), (0, 0, 255), cv2.MARKER_CROSS, 40, 2)
+
+    if ids is not None and len(ids) > 0:  # if any markers were detected this frame
+        for i in range(len(ids)):  # loop through every detection
+            m_id = int(ids[i][0])  # this marker's id
+            c = corners[i][0]  # shape (4, 2) corner points
+
+            # green bounding box connecting all 4 corners
+            pts = c.reshape((-1, 1, 2)).astype(np.int32)
+            cv2.polylines(display, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
+
+            # center of this marker using diagonal average (same as CameraUAVTest.py)
+            cX = int((c[0][0] + c[2][0]) / 2.0)
+            cY = int((c[0][1] + c[2][1]) / 2.0)
+
+            # green crosshair at the marker center
+            cv2.drawMarker(display, (cX, cY), (0, 255, 0), cv2.MARKER_CROSS, 24, 2)
+
+            # marker id label just above the box
+            cv2.putText(display, f"ID: {m_id}", (cX - 30, cY - 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+    # black status bar at the very top
+    cv2.rectangle(display, (0, 0), (w, 32), (0, 0, 0), -1)
+    cv2.putText(display, status_text, (8, 22),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+
+    return display
 
 ################################# main mission
 
@@ -241,6 +311,10 @@ def main():
             scan_start = time.time()
             land_trigger_seen = False
 
+            # open the preview window for the land trigger phase
+            cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(WINDOW_NAME, 1280, 720)
+
             print("[ArUco] Hovering and scanning for land trigger marker...")
 
             while not land_trigger_seen:
@@ -266,9 +340,21 @@ def main():
                         land_id = int(ids[0][0])
                         print(f"\n[ArUco] Land trigger marker seen! ID:{land_id} - Initiating landing.")
                         bridge.send_message(f"LAND TRIGGER: ID {land_id}")
+
+                        # show the final detection frame with a LANDING status before closing
+                        final_status = f"LAND TRIGGER  DETECTED ID:{land_id} - LANDING NOW"
+                        display = draw_scan_overlay(frame_bgr, corners, ids, final_status)
+                        cv2.imshow(WINDOW_NAME, display)
+                        cv2.waitKey(500)  # hold the final frame for half a second so you can see it
+                        cv2.destroyWindow(WINDOW_NAME)
+
                         land_trigger_seen = True  # exit the scan loop
                     else:
                         elapsed = time.time() - scan_start
+                        status = f"LAND TRIGGER  Hovering, show marker to land...  {elapsed:.1f}s  Alt:{alt:.2f}m"
+                        display = draw_scan_overlay(frame_bgr, corners, ids, status)
+                        cv2.imshow(WINDOW_NAME, display)
+                        cv2.waitKey(1)  # must call or window freezes
                         print(f" [ArUco] Hovering, waiting for marker... {elapsed:.1f}s  Alt:{alt:.2f}m", end='\r')
 
                 time.sleep(0.1)  # 10hz - matches the altitude hold loop rate from mission4
@@ -298,6 +384,7 @@ def main():
         set_throttle(master, 0)
         time.sleep(1)
     finally:
+        cv2.destroyAllWindows()  # close any open preview windows cleanly
         bridge.stop()
         print("Mission finalized.")
 
