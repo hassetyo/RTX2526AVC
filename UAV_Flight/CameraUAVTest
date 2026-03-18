@@ -5,239 +5,301 @@ import v2v_bridge # our custom radio bridge talker
 import cv2 # for aruco detection
 import pyzed.sl as sl # zed 2 sdk on jetson nano
 
-# uav mission 4 - autonomous flight (throttle override) + ugv circle
-# this uses the pattern the user confirmed works (stabilize + rc override)
+# uav mission 4 - aruco gate -> takeoff -> aruco land trigger
+# phase 1: scan for aruco on the ground before arming (pre-flight gate)
+# phase 2: take off and hover, command the rover circles
+# phase 3: scan for aruco again in the air - when seen, land
 
-################################# config stuff i setup
-# connection settings from your working test script
-CONNECTION_STRING = "/dev/ttyACM0"   # drone wire (use COM4 if testing on windows)
-BAUD_RATE = 57600                    # using the confirmed 57600 speed
-ESP32_PORT = "/dev/ttyUSB0"          # the radio bridge usb wire
+################################# config
 
-# mission params
-TARGET_ALT = 1.3    # hover height in meters (4.2 ft)
-CIRCLE_TIME = 18.0  # duration for the rover maneuvers
+CONNECTION_STRING = "/dev/ttyACM0"   # drone wire
+BAUD_RATE = 57600                    # confirmed baud
+ESP32_PORT = "/dev/ttyUSB0"          # radio bridge usb
 
-# throttle settings i tuned
-THROTTLE_MIN = 1000   # motors off
-THROTTLE_IDLE = 1150  # props spinning but no lift
-THROTTLE_CLIMB = 1650 # power to lift off the floor
-THROTTLE_HOVER = 1500 # rough middle ground for holding height
+TARGET_ALT = 1.3    # hover height in meters
+CIRCLE_TIME = 18.0  # duration for rover maneuvers
 
-# aruco settings
-ARUCO_DICT_TYPE = cv2.aruco.DICT_4X4_50  # marker dictionary type (change to match your printed marker)
-ARUCO_SCAN_TIMEOUT = 30.0               # max seconds to wait for a marker before aborting mission
+THROTTLE_MIN = 1000
+THROTTLE_IDLE = 1150
+THROTTLE_CLIMB = 1650
+THROTTLE_HOVER = 1500
 
-############################ the mavlink helpers i wrote
+ARUCO_DICT_TYPE = cv2.aruco.DICT_4X4_50  # must match your printed marker
+ARUCO_PREFLIGHT_TIMEOUT = 30.0           # seconds to wait for marker before aborting on the ground
+ARUCO_LAND_TIMEOUT = 0.0                 # 0 = wait forever in the air until marker appears (set a value to add timeout)
 
-def change_mode(master, mode: str): # changes the flight controller mode
-    mapping = master.mode_mapping() # ask for the list of modes
-    if mode not in mapping: # if the mode is fake
-        print(f"Unknown mode '{mode}'") # log the error
-        return # bail out
-    mode_id = mapping[mode] # find the secret mode id
-    master.mav.set_mode_send(master.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode_id) # blast it
-    print(f"Mode set: {mode}") # log the change
-    time.sleep(1) # wait for the mode to settle
+################################# mavlink helpers (unchanged from working code)
 
-def arm_drone(master): # engages the scary drone motors
+def change_mode(master, mode: str):
+    mapping = master.mode_mapping()
+    if mode not in mapping:
+        print(f"Unknown mode '{mode}'")
+        return
+    mode_id = mapping[mode]
+    master.mav.set_mode_send(master.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode_id)
+    print(f"Mode set: {mode}")
+    time.sleep(1)
+
+def arm_drone(master):
     master.mav.command_long_send(
         master.target_system, master.target_component,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0, 0, 0, 0, 0, 0 
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0, 0, 0, 0, 0, 0
     )
-    print("Arming motors...") # log the arming
-    time.sleep(2) # wait for the spinning to start
+    print("Arming motors...")
+    time.sleep(2)
 
-def disarm_drone(master): # stops the motors securely
+def disarm_drone(master):
     master.mav.command_long_send(
         master.target_system, master.target_component,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 0, 0, 0, 0, 0, 0 
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 0, 0, 0, 0, 0, 0
     )
-    print("Disarmed.") # log the safety
+    print("Disarmed.")
 
-def set_throttle(master, pwm): # physically pushes the throttle via rc override
-    # channel 3 is the throttle in ardupilot
+def set_throttle(master, pwm):
     master.mav.rc_channels_override_send(
         master.target_system, master.target_component,
         0, 0, pwm, 0, 0, 0, 0, 0
     )
 
-def get_lidar_alt(master): # checks the floor distance via lidar
-    msg = master.recv_match(type='DISTANCE_SENSOR', blocking=True, timeout=1.0) # wait for lidar packet
-    if msg: # if we got a real message
-        return msg.current_distance / 100.0 # return height in meters
-    return 0.0 # return zero if lidar is dead
+def get_lidar_alt(master):
+    msg = master.recv_match(type='DISTANCE_SENSOR', blocking=True, timeout=1.0)
+    if msg:
+        return msg.current_distance / 100.0
+    return 0.0
 
-############################ aruco scan via zed 2
+################################# aruco helper - reused for both scan phases
 
-def scan_aruco_marker():
+def build_aruco_detector():
+    # builds the detector once, reused for both the preflight scan and the land trigger scan
+    aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_TYPE)
+    aruco_params = cv2.aruco.DetectorParameters()
+    return cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
+
+def open_zed(depth=False):
+    # opens the zed 2 camera. depth=False for preflight scan (saves cpu), depth can stay off for land trigger too
+    cam = sl.Camera()
+    init_params = sl.InitParameters()
+    init_params.camera_resolution = sl.RESOLUTION.HD720
+    init_params.camera_fps = 30
+    init_params.depth_mode = sl.DEPTH_MODE.NONE  # no depth needed for either scan phase
+    status = cam.open(init_params)
+    if status != sl.ERROR_CODE.SUCCESS:
+        print(f"[ZED] Failed to open: {status}")
+        return None
+    return cam
+
+def scan_for_marker(cam, detector, timeout=0.0, label=""):
     """
-    Opens the ZED 2 camera and scans for any ArUco marker from the configured dictionary.
-    Blocks until a marker is found or ARUCO_SCAN_TIMEOUT seconds pass.
-    Returns the detected marker ID (int) on success, or None on timeout.
+    Scans frames from an already-open ZED camera until a marker is detected.
+    timeout=0.0 means wait forever (used for the in-air land trigger).
+    timeout>0 means abort after that many seconds (used for preflight gate).
+    Returns detected marker ID (int) or None on timeout.
     """
-    print("[ArUco] Opening ZED 2 camera...") # log startup
+    zed_image = sl.Mat()
+    scan_start = time.time()
+    print(f"[ArUco{' ' + label if label else ''}] Scanning for marker... {'(timeout: ' + str(timeout) + 's)' if timeout > 0 else '(waiting indefinitely)'}")
 
-    # init zed camera
-    cam = sl.Camera() # create camera object
-    init_params = sl.InitParameters() # default params
-    init_params.camera_resolution = sl.RESOLUTION.HD720  # 720p is plenty for aruco and easier on the nano
-    init_params.camera_fps = 30 # 30fps
-    init_params.depth_mode = sl.DEPTH_MODE.NONE # we dont need depth here, saves cpu on the nano
+    while True:
+        elapsed = time.time() - scan_start
 
-    status = cam.open(init_params) # open the camera
-    if status != sl.ERROR_CODE.SUCCESS: # if it failed
-        print(f"[ArUco] ZED open failed: {status}") # log the error
-        return None # bail with no detection
+        # only check timeout if one was set
+        if timeout > 0 and elapsed >= timeout:
+            print(f"[ArUco] Timeout after {timeout}s. No marker found.")
+            return None
 
-    # build the aruco detector
-    aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_TYPE) # load marker dictionary
-    aruco_params = cv2.aruco.DetectorParameters() # default detection params
-    detector = cv2.aruco.ArucoDetector(aruco_dict, aruco_params) # build detector object
+        if cam.grab() == sl.ERROR_CODE.SUCCESS:
+            cam.retrieve_image(zed_image, sl.VIEW.LEFT)
+            frame = zed_image.get_data()
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
 
-    # zed image container
-    zed_image = sl.Mat() # mat to receive raw frame
+            corners, ids, _ = detector.detectMarkers(gray)
 
-    detected_id = None # will hold the found marker id
-    scan_start = time.time() # start the timeout clock
-    print(f"[ArUco] Scanning for marker... (timeout: {ARUCO_SCAN_TIMEOUT}s)") # log scan start
+            if ids is not None and len(ids) > 0:
+                detected_id = int(ids[0][0])
+                print(f"\n[ArUco] Marker detected! ID: {detected_id}")
+                return detected_id
 
-    while True: # scan loop
-        # check timeout first
-        elapsed = time.time() - scan_start # seconds spent scanning
-        if elapsed >= ARUCO_SCAN_TIMEOUT: # if we ran out of time
-            print(f"[ArUco] Timeout after {ARUCO_SCAN_TIMEOUT}s. No marker found.") # log fail
-            break # exit loop with detected_id = None
+            print(f"[ArUco] Scanning... {elapsed:.1f}s", end='\r')
 
-        if cam.grab() == sl.ERROR_CODE.SUCCESS: # if we got a fresh frame
-            cam.retrieve_image(zed_image, sl.VIEW.LEFT) # pull left camera image
-            frame = zed_image.get_data() # raw numpy array (BGRA from ZED)
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR) # strip alpha channel for opencv
-            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY) # aruco works best on grayscale
+        time.sleep(0.05)  # ~20fps, easy on the nano
 
-            corners, ids, rejected = detector.detectMarkers(gray) # run the detector
+################################# main mission
 
-            if ids is not None and len(ids) > 0: # if we found at least one marker
-                detected_id = int(ids[0][0]) # grab the first detected marker's id
-                print(f"[ArUco] Marker detected! ID: {detected_id}") # log the find
-                break # exit scan loop, we're done
+def main():
+    print("==========================================")
+    print("   UAV MISSION 4 - ARUCO GATE + LAND TRIGGER")
+    print("==========================================")
 
-            # progress dot so we know its alive
-            print(f"[ArUco] Scanning... {elapsed:.1f}s", end='\r') # live timer
+    # connect to flight controller
+    print(f"Connecting to Drone: {CONNECTION_STRING}...")
+    master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE)
+    master.wait_heartbeat()
+    print("Drone Heartbeat OK.")
 
-        time.sleep(0.05) # ~20fps check rate, not hammering the nano
+    # connect radio bridge
+    bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="UAV-Bridge")
+    try:
+        bridge.connect()
+        bridge.send_message("MISSION 4: START")
+    except:
+        print("Radio Bridge Fail.")
+        return
 
-    cam.close() # always close the camera cleanly to free resources
-    print("[ArUco] ZED 2 camera closed.") # log close
-    return detected_id # return found id or None
+    try:
+        # ==========================================
+        # PHASE 1: PRE-FLIGHT ARUCO GATE (on ground, motors OFF)
+        # show the marker to the camera to authorize the flight
+        # if no marker is seen within the timeout, we never arm
+        # ==========================================
+        print("\n--- PHASE 1: PRE-FLIGHT ARUCO SCAN (motors off) ---")
+        detector = build_aruco_detector()  # build once, reuse in phase 3
+        cam = open_zed()
+        if cam is None:
+            print("[!] ZED failed to open. Aborting.")
+            bridge.stop()
+            return
 
-#################### the main mission 4 logic
+        preflight_id = scan_for_marker(cam, detector, timeout=ARUCO_PREFLIGHT_TIMEOUT, label="PREFLIGHT")
+        cam.close()  # close camera between phases to free usb bandwidth
+        print("[ZED] Camera closed after preflight scan.")
 
-def main(): # the main boss function
-    print("==========================================") # header
-    print("   UAV MISSION 4 - CONFIRMED MAVLINK PATTERN") # title
-    print("==========================================") # footer
-    
-    # step 1: connect to the wires
-    print(f"Connecting to Drone: {CONNECTION_STRING}...") # login
-    master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE) # open link
-    master.wait_heartbeat() # wait for buzz
-    print("Drone Heartbeat OK.") # success
+        if preflight_id is None:
+            print("[!] No marker seen. Aborting mission - drone will NOT arm.")
+            bridge.stop()
+            return
 
-    bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="UAV-Bridge") # radio bridge
-    try: # try to open radio
-        bridge.connect() # open serial wires
-        bridge.send_message("MISSION 4: MAVLINK MODE START") # yell over air
-    except: # if radio is missing
-        print("Radio Bridge Fail.") # log fail
-        return # bail
+        print(f"[ArUco] Preflight gate PASSED (ID:{preflight_id}). Arming...")
+        bridge.send_message(f"PREFLIGHT GATE PASSED: ID {preflight_id}")
 
-    try: # wrapping mission in safety block
-        # step 2: arm drone and scan aruco before doing anything else
-        change_mode(master, "STABILIZE") # switch to stabilize for manual throttle control
-        arm_drone(master) # start the props
+        # ==========================================
+        # PHASE 2: ARM + TAKEOFF + ROVER MISSION
+        # identical to the original working mission4 code
+        # ==========================================
+        print("\n--- PHASE 2: TAKEOFF AND ROVER MISSION ---")
+        change_mode(master, "STABILIZE")
+        arm_drone(master)
 
-        # ---- aruco scan gate ----
-        # motors are now armed (spinning at idle). we scan for the marker before committing to flight.
-        # if we timeout without finding one we disarm cleanly and abort the mission.
-        marker_id = scan_aruco_marker() # open zed, scan, return id or None
+        # climb to target altitude
+        print("Climbing to 1.3m...")
+        while True:
+            alt = get_lidar_alt(master)
+            print(f" Altitude: {alt:.2f}m", end='\r')
+            if alt >= TARGET_ALT:
+                set_throttle(master, THROTTLE_HOVER)
+                print(f"\nHover altitude reached: {alt:.2f}m")
+                break
+            set_throttle(master, THROTTLE_CLIMB)
+            time.sleep(0.1)
 
-        if marker_id is None: # if we never found a marker
-            print("[!] No ArUco marker detected. Aborting mission and disarming.") # log abort
-            disarm_drone(master) # kill the motors safely
-            bridge.stop() # close radio
-            return # exit mission
+        # sync with rover
+        print("Waiting for UGV sync...")
+        while True:
+            set_throttle(master, THROTTLE_HOVER)  # keep heartbeat alive
+            data = bridge.get_telemetry()
+            if data:
+                print("UGV Ready. Initiating Circles.")
+                break
+            time.sleep(0.2)
 
-        print(f"[ArUco] Marker ID {marker_id} confirmed. Continuing mission...") # log go-ahead
-        bridge.send_message(f"ARUCO GATE PASSED: MARKER {marker_id}") # broadcast over radio
-        # ---- end aruco gate ----
+        # command rover circles
+        bridge.send_command(cmdSeq=400, cmd=v2v_bridge.CMD_CIRCLE, estop=0)
 
-        # step 3: takeoff sequence (using your working pattern)
-        print("Climbing to 1.3m...") # log the climb
-        while True: # loop until target height
-            alt = get_lidar_alt(master) # check lidar
-            print(f" Altitude: {alt:.2f}m", end='\r') # log height
-            if alt >= TARGET_ALT: # if we hit the hover point
-                set_throttle(master, THROTTLE_HOVER) # pull back to hover power
-                print(f"\nHover altitude reached: {alt:.2f}m") # declare success
-                break # break the climb
-            set_throttle(master, THROTTLE_CLIMB) # keep pushing up
-            time.sleep(0.1) # quick loop
+        start_t = time.time()
+        while (time.time() - start_t) < CIRCLE_TIME:
+            data = bridge.get_telemetry()
+            if data:
+                print(f" UGV Speed: {data[2]:.2f} m/s", end='\r')
 
-        # step 4: sync with ground rover
-        print("Waiting for UGV sync...") # logging wait
-        while True: # loop until radio sync
-            set_throttle(master, THROTTLE_HOVER) # MUST keep sending hover pulse or it crashes
-            data = bridge.get_telemetry() # pull from mailbox
-            if data: # if we got a packet
-                print("UGV Ready. Initiating Circles.") # log coordination
-                break # done
-            time.sleep(0.2) # check 5 times a second to keep rc heartbeat alive
+            alt = get_lidar_alt(master)
+            if alt < TARGET_ALT - 0.1:
+                set_throttle(master, THROTTLE_HOVER + 100)
+            elif alt > TARGET_ALT + 0.1:
+                set_throttle(master, THROTTLE_HOVER - 100)
+            else:
+                set_throttle(master, THROTTLE_HOVER)
 
-        # step 5: command the rover work
-        bridge.send_command(cmdSeq=400, cmd=v2v_bridge.CMD_CIRCLE, estop=0) # blast command
-        
-        start_t = time.time() # start clock
-        while (time.time() - start_t) < CIRCLE_TIME: # loop for duration
-            data = bridge.get_telemetry() # check status
-            if data: # if real status
-                print(f" UGV Speed: {data[2]:.2f} m/s", end='\r') # log rover stats
-            
-            # small "crude" altitude hold logic i added
-            alt = get_lidar_alt(master) # check lidar
-            if alt < TARGET_ALT - 0.1: # if we are sinking
-                set_throttle(master, THROTTLE_HOVER + 100) # give it more juice
-            elif alt > TARGET_ALT + 0.1: # if we are drifting too high
-                set_throttle(master, THROTTLE_HOVER - 100) # cut power
-            else: # if we are golden
-                set_throttle(master, THROTTLE_HOVER) # keep steady
-            
-            time.sleep(0.1) # 10hz loop
+            time.sleep(0.1)
 
-        # step 6: land and shutdown
-        print("\nLanding sequence engaged...") # start descent
-        change_mode(master, "LAND") # switch to official land mode for graceful touchdown
-        set_throttle(master, 0) # release throttle override so autopilot takes over
+        # ==========================================
+        # PHASE 3: IN-AIR ARUCO LAND TRIGGER
+        # hover and hold altitude while scanning for the marker
+        # the moment the marker is seen, we initiate landing
+        # no timeout - it waits as long as needed
+        # ==========================================
+        print("\n--- PHASE 3: HOVERING - SHOW MARKER TO LAND ---")
+        bridge.send_message("PHASE 3: SHOW MARKER TO LAND")
 
-        while True: # loop until we hit the floor
-            alt = get_lidar_alt(master) # check lidar
-            print(f" Land Alt: {alt:.2f}m", end='\r') # log altitude
-            
-            # checking if the drone disarmed itself (autopilot does this after landing)
+        cam = open_zed()  # reopen the camera for the land trigger scan
+        if cam is None:
+            # camera failed - just land anyway rather than hover forever
+            print("[!] ZED failed to open for land trigger. Landing now.")
+        else:
+            # keep sending throttle while the zed scans
+            # we do this by checking the camera and sending throttle on each loop iteration
+            zed_image = sl.Mat()
+            scan_start = time.time()
+            land_trigger_seen = False
+
+            print("[ArUco] Hovering and scanning for land trigger marker...")
+
+            while not land_trigger_seen:
+                # altitude hold - must send every cycle or drone drops
+                alt = get_lidar_alt(master)
+                if alt < TARGET_ALT - 0.1:
+                    set_throttle(master, THROTTLE_HOVER + 100)
+                elif alt > TARGET_ALT + 0.1:
+                    set_throttle(master, THROTTLE_HOVER - 100)
+                else:
+                    set_throttle(master, THROTTLE_HOVER)
+
+                # scan one frame
+                if cam.grab() == sl.ERROR_CODE.SUCCESS:
+                    cam.retrieve_image(zed_image, sl.VIEW.LEFT)
+                    frame = zed_image.get_data()
+                    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+
+                    corners, ids, _ = detector.detectMarkers(gray)
+
+                    if ids is not None and len(ids) > 0:
+                        land_id = int(ids[0][0])
+                        print(f"\n[ArUco] Land trigger marker seen! ID:{land_id} - Initiating landing.")
+                        bridge.send_message(f"LAND TRIGGER: ID {land_id}")
+                        land_trigger_seen = True  # exit the scan loop
+                    else:
+                        elapsed = time.time() - scan_start
+                        print(f" [ArUco] Hovering, waiting for marker... {elapsed:.1f}s  Alt:{alt:.2f}m", end='\r')
+
+                time.sleep(0.1)  # 10hz - matches the altitude hold loop rate from mission4
+
+            cam.close()
+            print("[ZED] Camera closed after land trigger.")
+
+        # ==========================================
+        # LAND - same as original mission4 landing
+        # ==========================================
+        print("\nLanding sequence engaged...")
+        change_mode(master, "LAND")
+        set_throttle(master, 0)  # release override so autopilot takes over
+
+        while True:
+            alt = get_lidar_alt(master)
+            print(f" Land Alt: {alt:.2f}m", end='\r')
             msg = master.recv_match(type='HEARTBEAT', blocking=False)
             if msg and not (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
-                print("\nTouchdown confirmed. Motors stopped.") # log success
-                break # exit
-            time.sleep(0.5) # slower loop for checking
+                print("\nTouchdown confirmed. Motors stopped.")
+                break
+            time.sleep(0.5)
 
-    except KeyboardInterrupt: # someone hit ctrl+c
-        print("\n[!] Emergency: User Triggered Landing...") # abort log
-        change_mode(master, "LAND") # force land mode immediately
-        set_throttle(master, 0) # release override
-        time.sleep(1) # wait for command to hit
-    finally: # final chores
-        bridge.stop() # close radio wire
-        print("Mission finalized.") # end log
+    except KeyboardInterrupt:
+        print("\n[!] Emergency: User Triggered Landing...")
+        change_mode(master, "LAND")
+        set_throttle(master, 0)
+        time.sleep(1)
+    finally:
+        bridge.stop()
+        print("Mission finalized.")
 
-if __name__ == "__main__": # entry point
-    main() # run it
+if __name__ == "__main__":
+    main()
