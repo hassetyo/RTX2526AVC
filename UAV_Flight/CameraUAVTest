@@ -1,392 +1,624 @@
-from pymavlink import mavutil # using the confirmed mavlink pattern instead of dronekit
-import time # for timing and sleeps
-import sys # for clean exits
-import v2v_bridge # our custom radio bridge talker
-import cv2 # for aruco detection
-import pyzed.sl as sl # zed 2 sdk on jetson nano
-import numpy as np # for overlay drawing
+from pymavlink import mavutil
+import time
+import sys
+import math
+import v2v_bridge
+import cv2
+import cv2.aruco as aruco
+import pyzed.sl as sl
+import numpy as np
 
-# uav mission 4 - aruco gate -> takeoff -> aruco land trigger
-# phase 1: scan for aruco on the ground before arming (pre-flight gate)
-# phase 2: take off and hover, command the rover circles
-# phase 3: scan for aruco again in the air - when seen, land
+# uav mission 5 - vision guided
+# phase 1: takeoff to TARGET_ALT
+# phase 2: fly forward ~5 meters (timed pitch override)
+# phase 3: acquire first aruco marker visible, center on it, hold for CENTER_HOLD_TIME seconds
+# phase 4: drift back to centered on marker (within deadband), then land cleanly
 
-################################# config
+##############################################################################
+# CONFIG
+##############################################################################
 
-CONNECTION_STRING = "/dev/ttyACM0"   # drone wire
-BAUD_RATE = 57600                    # confirmed baud
-ESP32_PORT = "/dev/ttyUSB0"          # radio bridge usb
+CONNECTION_STRING = "/dev/ttyACM0"
+BAUD_RATE         = 57600
+ESP32_PORT        = "/dev/ttyUSB0"
 
-TARGET_ALT = 1.3    # hover height in meters
-CIRCLE_TIME = 18.0  # duration for rover maneuvers
+# flight params
+TARGET_ALT        = 1.3    # hover height in meters
 
-THROTTLE_MIN = 1000
-THROTTLE_IDLE = 1150
-THROTTLE_CLIMB = 1650
-THROTTLE_HOVER = 1500
+# throttle values (same confirmed values from mission4)
+THROTTLE_CLIMB    = 1650
+THROTTLE_HOVER    = 1500
 
-ARUCO_DICT_TYPE = cv2.aruco.DICT_4X4_50  # must match your printed marker
-ARUCO_PREFLIGHT_TIMEOUT = 30.0           # seconds to wait for marker before aborting on the ground
-ARUCO_LAND_TIMEOUT = 0.0                 # 0 = wait forever in the air until marker appears (set a value to add timeout)
+# forward flight to cover ~5 meters
+# in STABILIZE at this pitch pwm the drone moves ~0.6-0.8 m/s forward
+# tune FORWARD_FLIGHT_TIME until you hit 5m in your environment
+FORWARD_PITCH_PWM  = 1580   # slight forward pitch (1500=neutral, 2000=full forward)
+FORWARD_FLIGHT_TIME = 7.0   # seconds of forward flight (tune: ~7s * 0.7m/s ≈ 5m)
 
-################################# mavlink helpers (unchanged from working code)
+# centering / follow config
+CENTER_HOLD_TIME  = 60.0   # seconds to hold centered on the marker before landing
+PIXEL_DEADBAND    = 25     # pixels - ignore error smaller than this to prevent jitter
+KP_ROLL           = 0.04   # gain: pixel error -> roll pwm nudge
+KP_PITCH          = 0.04   # gain: pixel error -> pitch pwm nudge
+MAX_NUDGE         = 120    # max pwm offset from center in any direction
 
-def change_mode(master, mode: str):
+RC_CENTER         = 1500
+FOLLOW_HZ         = 10     # rc override update rate
+
+# aruco
+# using DICT_6X6_1000 to match the vision code's detector
+ARUCO_DICT_TYPE   = aruco.DICT_6X6_1000
+
+# calibration file from the vision code - used for pose display only, not required for flight
+# set to None to skip pose estimation display
+CALIBRATION_FILE  = "../CameraCalibration/calibration_chessboard.yaml"
+MARKER_SIZE       = 0.1    # meters, used for pose estimation display
+
+# preview window
+WINDOW_NAME       = "UAV Mission 5 - Vision"
+
+##############################################################################
+# MAVLINK HELPERS  (unchanged from confirmed mission4 pattern)
+##############################################################################
+
+def change_mode(master, mode):
     mapping = master.mode_mapping()
     if mode not in mapping:
-        print(f"Unknown mode '{mode}'")
+        print(f"[FC] Unknown mode '{mode}'")
         return
-    mode_id = mapping[mode]
-    master.mav.set_mode_send(master.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode_id)
-    print(f"Mode set: {mode}")
+    master.mav.set_mode_send(
+        master.target_system,
+        mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+        mapping[mode]
+    )
+    print(f"[FC] Mode set: {mode}")
     time.sleep(1)
 
 def arm_drone(master):
     master.mav.command_long_send(
         master.target_system, master.target_component,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0, 0, 0, 0, 0, 0
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        0, 1, 0, 0, 0, 0, 0, 0
     )
-    print("Arming motors...")
+    print("[FC] Arming motors...")
     time.sleep(2)
 
 def disarm_drone(master):
     master.mav.command_long_send(
         master.target_system, master.target_component,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 0, 0, 0, 0, 0, 0
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        0, 0, 0, 0, 0, 0, 0, 0
     )
-    print("Disarmed.")
+    print("[FC] Disarmed.")
 
-def set_throttle(master, pwm):
+def set_rc_override(master, roll, pitch, throttle, yaw=RC_CENTER):
+    # sends all 4 channels at once - same pattern confirmed in mission4
     master.mav.rc_channels_override_send(
         master.target_system, master.target_component,
-        0, 0, pwm, 0, 0, 0, 0, 0
+        roll, pitch, throttle, yaw,
+        0, 0, 0, 0
     )
 
-def get_lidar_alt(master):
-    msg = master.recv_match(type='DISTANCE_SENSOR', blocking=True, timeout=1.0)
+def get_lidar_alt(master, blocking=False):
+    # non-blocking by default so the follow loop never stalls
+    # blocking=True only used during takeoff where timing is not critical
+    msg = master.recv_match(type='DISTANCE_SENSOR', blocking=blocking, timeout=0.05)
     if msg:
         return msg.current_distance / 100.0
     return 0.0
 
-################################# aruco helper - reused for both scan phases
+def throttle_hold(current_alt):
+    # same crude but working altitude hold logic from mission4
+    if current_alt < TARGET_ALT - 0.1:
+        return THROTTLE_HOVER + 100
+    elif current_alt > TARGET_ALT + 0.1:
+        return THROTTLE_HOVER - 100
+    return THROTTLE_HOVER
 
-def build_aruco_detector():
-    # builds the detector once, reused for both the preflight scan and the land trigger scan
-    aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_TYPE)
-    aruco_params = cv2.aruco.DetectorParameters()
-    return cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
+##############################################################################
+# ZED + ARUCO SETUP  (from vision code, adapted for pyzed.sl import style)
+##############################################################################
 
-def open_zed(depth=False):
-    # opens the zed 2 camera. depth=False for preflight scan (saves cpu), depth can stay off for land trigger too
+def open_zed():
+    print("[ZED] Opening camera...")
     cam = sl.Camera()
-    init_params = sl.InitParameters()
-    init_params.camera_resolution = sl.RESOLUTION.HD720
-    init_params.camera_fps = 30
-    init_params.depth_mode = sl.DEPTH_MODE.NONE  # no depth needed for either scan phase
-    status = cam.open(init_params)
+    p = sl.InitParameters()
+    p.camera_resolution = sl.RESOLUTION.HD720  # 720p, easier on Nano
+    p.camera_fps        = 30
+    p.depth_mode        = sl.DEPTH_MODE.NONE   # no depth needed, saves cpu
+    # mirror the vision code's low exposure setting to reduce motion blur
+    cam.set_camera_settings(sl.VIDEO_SETTINGS.EXPOSURE, 1)
+    status = cam.open(p)
     if status != sl.ERROR_CODE.SUCCESS:
-        print(f"[ZED] Failed to open: {status}")
+        print(f"[ZED] Open failed: {status}")
         return None
+    print("[ZED] Camera ready.")
     return cam
 
-def scan_for_marker(cam, detector, timeout=0.0, label=""):
+def build_detector():
+    # uses DICT_6X6_1000 from the vision code
+    d = aruco.getPredefinedDictionary(ARUCO_DICT_TYPE)
+    p = aruco.DetectorParameters()
+    return aruco.ArucoDetector(d, p)
+
+def load_calibration():
+    # loads camera matrix and distortion coefficients from the vision code's calibration yaml
+    # returns (camera_matrix, dist_coeffs) or (None, None) if file is missing
+    if CALIBRATION_FILE is None:
+        return None, None
+    try:
+        fs = cv2.FileStorage(CALIBRATION_FILE, cv2.FILE_STORAGE_READ)
+        K = fs.getNode("K").mat()
+        D = fs.getNode("D").mat()
+        fs.release()
+        if K is None or D is None:
+            print("[CAL] Calibration file missing K or D nodes - pose display disabled.")
+            return None, None
+        print("[CAL] Calibration loaded.")
+        return K, D
+    except Exception as e:
+        print(f"[CAL] Could not load calibration: {e} - pose display disabled.")
+        return None, None
+
+def grab_frame(cam, zed_image):
+    # grabs one frame from the zed and returns a BGR numpy array, or None on failure
+    if cam.grab() != sl.ERROR_CODE.SUCCESS:
+        return None
+    cam.retrieve_image(zed_image, sl.VIEW.LEFT)
+    frame = zed_image.get_data()                   # BGRA from ZED
+    return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)  # strip alpha, same as vision code
+
+##############################################################################
+# PIXEL-BASED PID CORRECTION  (same approach as confirmed follower code)
+##############################################################################
+
+def compute_correction(cx_marker, cy_marker, frame_w, frame_h):
     """
-    Scans frames from an already-open ZED camera until a marker is detected.
-    timeout=0.0 means wait forever (used for the in-air land trigger).
-    timeout>0 means abort after that many seconds (used for preflight gate).
-    Shows a live preview window with green boxes drawn around any detected markers.
-    Returns detected marker ID (int) or None on timeout.
+    Maps pixel error (marker center vs frame center) to roll/pitch pwm nudges.
+    Returns (roll_pwm, pitch_pwm, err_x, err_y).
+    err_x/err_y returned so we can check the deadband externally for the land gate.
     """
-    zed_image = sl.Mat()
-    scan_start = time.time()
-    timeout_str = f"timeout: {timeout}s" if timeout > 0 else "waiting indefinitely"
-    print(f"[ArUco{' ' + label if label else ''}] Scanning for marker... ({timeout_str})")
+    err_x = cx_marker - (frame_w / 2.0)   # positive = marker is right of center
+    err_y = cy_marker - (frame_h / 2.0)   # positive = marker is below center (y flips)
 
-    # open the preview window for this scan phase
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(WINDOW_NAME, 1280, 720)
+    # apply deadband
+    ex = 0.0 if abs(err_x) < PIXEL_DEADBAND else err_x
+    ey = 0.0 if abs(err_y) < PIXEL_DEADBAND else err_y
 
-    while True:
-        elapsed = time.time() - scan_start
+    roll_pwm  = int(RC_CENTER + max(-MAX_NUDGE, min(MAX_NUDGE, KP_ROLL  * ex)))
+    pitch_pwm = int(RC_CENTER + max(-MAX_NUDGE, min(MAX_NUDGE, KP_PITCH * ey)))
 
-        # only check timeout if one was set
-        if timeout > 0 and elapsed >= timeout:
-            print(f"\n[ArUco] Timeout after {timeout}s. No marker found.")
-            cv2.destroyWindow(WINDOW_NAME)  # close window on timeout
-            return None
+    return roll_pwm, pitch_pwm, err_x, err_y
 
-        if cam.grab() == sl.ERROR_CODE.SUCCESS:
-            cam.retrieve_image(zed_image, sl.VIEW.LEFT)
-            frame = zed_image.get_data()
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+def marker_center(corners_i):
+    # diagonal average, same method used in vision code and CameraUAVTest.py
+    c = corners_i[0]
+    return (
+        int((c[0][0] + c[2][0]) / 2.0),
+        int((c[0][1] + c[2][1]) / 2.0)
+    )
 
-            corners, ids, _ = detector.detectMarkers(gray)
+##############################################################################
+# OVERLAY DRAWING
+##############################################################################
 
-            # build status bar text for the window
-            if ids is not None and len(ids) > 0:
-                id_list = [str(int(ids[i][0])) for i in range(len(ids))]
-                status = f"{label}  DETECTED: ID {', '.join(id_list)}  {elapsed:.1f}s"
-            else:
-                status = f"{label}  Scanning...  {elapsed:.1f}s"
-                if timeout > 0:
-                    status += f"  (abort in {max(0, timeout - elapsed):.0f}s)"
-
-            # draw overlay and push to window
-            display = draw_scan_overlay(frame_bgr, corners, ids, status)
-            cv2.imshow(WINDOW_NAME, display)
-            cv2.waitKey(1)  # must call or window freezes
-
-            if ids is not None and len(ids) > 0:
-                detected_id = int(ids[0][0])
-                print(f"\n[ArUco] Marker detected! ID: {detected_id}")
-                # leave window open for a moment so you can see the final detection
-                time.sleep(0.5)
-                cv2.destroyWindow(WINDOW_NAME)
-                return detected_id
-
-            print(f"[ArUco] Scanning... {elapsed:.1f}s", end='\r')
-
-        time.sleep(0.05)  # ~20fps, easy on the nano
-
-################################# preview window
-
-WINDOW_NAME = "UAV Mission 4 - ArUco Scanner"  # shared window title for both scan phases
-
-def draw_scan_overlay(frame_bgr, corners, ids, status_text):
+def draw_overlay(frame, corners, ids, status_text, camera_matrix, dist_coeffs,
+                 target_id=None, frame_w=1280, frame_h=720):
     """
-    Draws onto the BGR frame for the live preview window.
-    - Black status bar at the top with current phase and elapsed time
-    - Green bounding box + center crosshair around every detected marker
-    - Red crosshair at the frame center so you can see where to aim the marker
-    Returns the annotated frame ready for cv2.imshow.
+    Draws onto the frame for the live preview window.
+    - Red crosshair at frame center (aim point)
+    - Green box + center cross + ID label on every detected marker
+    - If calibration is available, draws pose axes and shows tvec distance
+    - Black status bar at top
+    Matches the labelling style from the vision code's label_marker() and
+    display_camera_position() functions.
     """
-    display = frame_bgr.copy()
-    h, w = display.shape[:2]
+    out = frame.copy()
 
-    # red crosshair at the center of the frame - aim the marker here
-    cv2.drawMarker(display, (w // 2, h // 2), (0, 0, 255), cv2.MARKER_CROSS, 40, 2)
+    # red crosshair at frame center - where we want the marker to be
+    cv2.drawMarker(out, (frame_w // 2, frame_h // 2), (0, 0, 255), cv2.MARKER_CROSS, 40, 2)
 
-    if ids is not None and len(ids) > 0:  # if any markers were detected this frame
-        for i in range(len(ids)):  # loop through every detection
-            m_id = int(ids[i][0])  # this marker's id
-            c = corners[i][0]  # shape (4, 2) corner points
+    if ids is not None and len(ids) > 0:
+        # draw detected marker outlines (mirrors vision code's drawDetectedMarkers call)
+        out = aruco.drawDetectedMarkers(out, corners)
 
-            # green bounding box connecting all 4 corners
+        for i, mid in enumerate(ids.flatten()):
+            c      = corners[i][0]
+            cx     = int((c[0][0] + c[2][0]) / 2.0)
+            cy     = int((c[0][1] + c[2][1]) / 2.0)
+            color  = (0, 255, 0) if mid == target_id else (0, 200, 255)
+
+            # bounding box
             pts = c.reshape((-1, 1, 2)).astype(np.int32)
-            cv2.polylines(display, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
+            cv2.polylines(out, [pts], isClosed=True, color=color, thickness=2)
 
-            # center of this marker using diagonal average (same as CameraUAVTest.py)
-            cX = int((c[0][0] + c[2][0]) / 2.0)
-            cY = int((c[0][1] + c[2][1]) / 2.0)
+            # center crosshair
+            cv2.drawMarker(out, (cx, cy), color, cv2.MARKER_CROSS, 20, 2)
 
-            # green crosshair at the marker center
-            cv2.drawMarker(display, (cX, cY), (0, 255, 0), cv2.MARKER_CROSS, 24, 2)
+            # id label (matches vision code style)
+            label_pos = np.mean(c, axis=0).astype(int)
+            cv2.putText(out, f"ID: {mid}", (label_pos[0] - 20, label_pos[1] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
-            # marker id label just above the box
-            cv2.putText(display, f"ID: {m_id}", (cX - 30, cY - 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            # pose axes + tvec readout when calibration is loaded (from vision code)
+            if camera_matrix is not None and mid == target_id:
+                try:
+                    rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(
+                        corners[i], MARKER_SIZE, camera_matrix, dist_coeffs
+                    )
+                    rvec = rvecs[0].flatten()
+                    tvec = tvecs[0].flatten()
+                    cv2.drawFrameAxes(out, camera_matrix, dist_coeffs, rvec, tvec, 0.05)
+                    # display forward/side/height distances from vision code's display_camera_position()
+                    dist_str = (f"Fwd:{tvec[1]:.2f}m  Side:{tvec[0]:.2f}m  Ht:{tvec[2]:.2f}m")
+                    cv2.putText(out, dist_str, (cx - 120, cy + 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                except Exception:
+                    pass  # pose estimation can fail on edge frames, not critical
 
-    # black status bar at the very top
-    cv2.rectangle(display, (0, 0), (w, 32), (0, 0, 0), -1)
-    cv2.putText(display, status_text, (8, 22),
+    # black status bar at top
+    cv2.rectangle(out, (0, 0), (frame_w, 32), (0, 0, 0), -1)
+    cv2.putText(out, status_text, (8, 22),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
 
-    return display
+    return out
 
-################################# main mission
+##############################################################################
+# MAIN MISSION
+##############################################################################
 
 def main():
     print("==========================================")
-    print("   UAV MISSION 4 - ARUCO GATE + LAND TRIGGER")
+    print("   UAV MISSION 5 - VISION GUIDED")
+    print("   Takeoff -> 5m Forward -> Center ArUco -> Land")
     print("==========================================")
 
-    # connect to flight controller
-    print(f"Connecting to Drone: {CONNECTION_STRING}...")
+    # connect flight controller
+    print(f"[FC] Connecting: {CONNECTION_STRING}...")
     master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE)
     master.wait_heartbeat()
-    print("Drone Heartbeat OK.")
+    print("[FC] Heartbeat OK.")
 
     # connect radio bridge
     bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="UAV-Bridge")
     try:
         bridge.connect()
-        bridge.send_message("MISSION 4: START")
-    except:
-        print("Radio Bridge Fail.")
+        bridge.send_message("MISSION 5: START")
+    except Exception:
+        print("[Bridge] Radio bridge failed to connect.")
         return
 
+    # open ZED and load calibration before arming
+    cam = open_zed()
+    if cam is None:
+        print("[!] ZED failed. Aborting.")
+        bridge.stop()
+        return
+
+    camera_matrix, dist_coeffs = load_calibration()
+    detector  = build_detector()
+    zed_image = sl.Mat()
+
+    # confirm frame size from a real frame before flight
+    frame_w, frame_h = 1280, 720
+    if cam.grab() == sl.ERROR_CODE.SUCCESS:
+        cam.retrieve_image(zed_image, sl.VIEW.LEFT)
+        raw = zed_image.get_data()
+        frame_h, frame_w = raw.shape[:2]
+        print(f"[ZED] Frame size: {frame_w}x{frame_h}")
+
+    # open the preview window now so it is visible from the start
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(WINDOW_NAME, 1280, 720)
+
     try:
-        # ==========================================
-        # PHASE 1: PRE-FLIGHT ARUCO GATE (on ground, motors OFF)
-        # show the marker to the camera to authorize the flight
-        # if no marker is seen within the timeout, we never arm
-        # ==========================================
-        print("\n--- PHASE 1: PRE-FLIGHT ARUCO SCAN (motors off) ---")
-        detector = build_aruco_detector()  # build once, reuse in phase 3
-        cam = open_zed()
-        if cam is None:
-            print("[!] ZED failed to open. Aborting.")
-            bridge.stop()
-            return
-
-        preflight_id = scan_for_marker(cam, detector, timeout=ARUCO_PREFLIGHT_TIMEOUT, label="PREFLIGHT")
-        cam.close()  # close camera between phases to free usb bandwidth
-        print("[ZED] Camera closed after preflight scan.")
-
-        if preflight_id is None:
-            print("[!] No marker seen. Aborting mission - drone will NOT arm.")
-            bridge.stop()
-            return
-
-        print(f"[ArUco] Preflight gate PASSED (ID:{preflight_id}). Arming...")
-        bridge.send_message(f"PREFLIGHT GATE PASSED: ID {preflight_id}")
-
-        # ==========================================
-        # PHASE 2: ARM + TAKEOFF + ROVER MISSION
-        # identical to the original working mission4 code
-        # ==========================================
-        print("\n--- PHASE 2: TAKEOFF AND ROVER MISSION ---")
+        ##################################################################
+        # PHASE 1: TAKEOFF
+        ##################################################################
+        print("\n--- PHASE 1: TAKEOFF ---")
         change_mode(master, "STABILIZE")
         arm_drone(master)
+        bridge.send_message("PHASE 1: TAKEOFF")
 
-        # climb to target altitude
-        print("Climbing to 1.3m...")
         while True:
-            alt = get_lidar_alt(master)
-            print(f" Altitude: {alt:.2f}m", end='\r')
+            alt = get_lidar_alt(master, blocking=True)  # blocking ok here, not time critical yet
+            print(f" Alt: {alt:.2f}m", end='\r')
+
+            # keep preview window live during climb
+            frame = grab_frame(cam, zed_image)
+            if frame is not None:
+                display = draw_overlay(frame, None, None,
+                                       f"TAKEOFF  Alt:{alt:.2f}m  Target:{TARGET_ALT}m",
+                                       camera_matrix, dist_coeffs,
+                                       frame_w=frame_w, frame_h=frame_h)
+                cv2.imshow(WINDOW_NAME, display)
+                cv2.waitKey(1)
+
             if alt >= TARGET_ALT:
-                set_throttle(master, THROTTLE_HOVER)
-                print(f"\nHover altitude reached: {alt:.2f}m")
+                set_rc_override(master, RC_CENTER, RC_CENTER, THROTTLE_HOVER)
+                print(f"\n[FC] Hover altitude reached: {alt:.2f}m")
                 break
-            set_throttle(master, THROTTLE_CLIMB)
+
+            set_rc_override(master, RC_CENTER, RC_CENTER, THROTTLE_CLIMB)
             time.sleep(0.1)
 
-        # sync with rover
-        print("Waiting for UGV sync...")
+        ##################################################################
+        # PHASE 2: FLY FORWARD ~5 METERS
+        # timed pitch override - tune FORWARD_FLIGHT_TIME for your environment
+        ##################################################################
+        print(f"\n--- PHASE 2: FLYING FORWARD ({FORWARD_FLIGHT_TIME}s at pitch {FORWARD_PITCH_PWM}) ---")
+        bridge.send_message("PHASE 2: FLYING FORWARD")
+
+        fwd_start = time.time()
+        while (time.time() - fwd_start) < FORWARD_FLIGHT_TIME:
+            elapsed = time.time() - fwd_start
+            remaining = FORWARD_FLIGHT_TIME - elapsed
+
+            # altitude hold while flying forward
+            alt = get_lidar_alt(master)
+            thr = throttle_hold(alt)
+
+            # pitch forward, keep roll/yaw centered
+            set_rc_override(master, RC_CENTER, FORWARD_PITCH_PWM, thr)
+
+            # keep preview window live
+            frame = grab_frame(cam, zed_image)
+            if frame is not None:
+                display = draw_overlay(frame, None, None,
+                                       f"FORWARD FLIGHT  {elapsed:.1f}s / {FORWARD_FLIGHT_TIME}s  "
+                                       f"remaining:{remaining:.1f}s  Alt:{alt:.2f}m",
+                                       camera_matrix, dist_coeffs,
+                                       frame_w=frame_w, frame_h=frame_h)
+                cv2.imshow(WINDOW_NAME, display)
+                cv2.waitKey(1)
+
+            print(f" Flying forward... {elapsed:.1f}s  Alt:{alt:.2f}m", end='\r')
+            time.sleep(0.1)
+
+        # stop forward motion and hover in place
+        alt = get_lidar_alt(master)
+        set_rc_override(master, RC_CENTER, RC_CENTER, throttle_hold(alt))
+        print(f"\n[FC] Forward flight complete. Hovering.")
+
+        ##################################################################
+        # PHASE 3: ACQUIRE MARKER + CENTER FOR 60 SECONDS
+        # scans until it sees ANY aruco marker, locks onto that ID,
+        # then centers on it using pixel PID for CENTER_HOLD_TIME seconds
+        ##################################################################
+        print(f"\n--- PHASE 3: ACQUIRING MARKER AND CENTERING ({CENTER_HOLD_TIME}s) ---")
+        bridge.send_message("PHASE 3: SEARCHING FOR MARKER")
+
+        target_id      = None   # the marker id we lock onto
+        confirm_count  = 0      # consecutive visible frames before we lock (avoids false positives)
+        CONFIRM_NEEDED = 3      # frames needed to confirm
+        center_timer   = None   # starts when we first lock on
+        loop_dt        = 1.0 / FOLLOW_HZ
+
         while True:
-            set_throttle(master, THROTTLE_HOVER)  # keep heartbeat alive
-            data = bridge.get_telemetry()
-            if data:
-                print("UGV Ready. Initiating Circles.")
-                break
-            time.sleep(0.2)
+            loop_start = time.time()
 
-        # command rover circles
-        bridge.send_command(cmdSeq=400, cmd=v2v_bridge.CMD_CIRCLE, estop=0)
+            alt      = get_lidar_alt(master)
+            thr      = throttle_hold(alt)
 
-        start_t = time.time()
-        while (time.time() - start_t) < CIRCLE_TIME:
-            data = bridge.get_telemetry()
-            if data:
-                print(f" UGV Speed: {data[2]:.2f} m/s", end='\r')
+            frame = grab_frame(cam, zed_image)
+            if frame is None:
+                # camera hiccup - hold position and retry
+                set_rc_override(master, RC_CENTER, RC_CENTER, thr)
+                time.sleep(0.05)
+                continue
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            corners, ids, _ = detector.detectMarkers(gray)
+
+            if ids is not None and len(ids) > 0:
+                # ---- marker visible ----
+
+                if target_id is None:
+                    # still in acquisition mode - count consecutive frames
+                    confirm_count += 1
+                    candidate = int(ids[0][0])
+                    if confirm_count >= CONFIRM_NEEDED:
+                        target_id    = candidate
+                        center_timer = time.time()  # start the 60s hold clock
+                        print(f"\n[ArUco] Locked onto marker ID:{target_id}. Centering for {CENTER_HOLD_TIME}s...")
+                        bridge.send_message(f"MARKER LOCKED: ID {target_id}")
+                else:
+                    # locked - find our target marker in the detections
+                    id_list = ids.flatten().tolist()
+                    if target_id in id_list:
+                        idx = id_list.index(target_id)
+                        cx, cy = marker_center(corners[idx])
+                        roll_pwm, pitch_pwm, ex, ey = compute_correction(cx, cy, frame_w, frame_h)
+                        set_rc_override(master, roll_pwm, pitch_pwm, thr)
+
+                        time_held   = time.time() - center_timer
+                        time_left   = CENTER_HOLD_TIME - time_held
+
+                        print(
+                            f" [Center] ID:{target_id} px:({cx},{cy}) "
+                            f"err:({ex:.0f},{ey:.0f}) "
+                            f"Roll:{roll_pwm} Pitch:{pitch_pwm} "
+                            f"Held:{time_held:.1f}s  Left:{time_left:.1f}s  Alt:{alt:.2f}m",
+                            end='\r'
+                        )
+
+                        # draw overlay with target marker highlighted
+                        status = (f"CENTERING ID:{target_id}  "
+                                  f"err:({ex:.0f},{ey:.0f})  "
+                                  f"held:{time_held:.1f}s  left:{time_left:.1f}s  "
+                                  f"Alt:{alt:.2f}m")
+                        display = draw_overlay(frame, corners, ids, status,
+                                               camera_matrix, dist_coeffs,
+                                               target_id=target_id,
+                                               frame_w=frame_w, frame_h=frame_h)
+                        cv2.imshow(WINDOW_NAME, display)
+                        cv2.waitKey(1)
+
+                        if time_held >= CENTER_HOLD_TIME:
+                            print(f"\n[ArUco] {CENTER_HOLD_TIME}s centering complete. Moving to land phase.")
+                            bridge.send_message("CENTERING COMPLETE: PREPARING TO LAND")
+                            break  # exit phase 3 loop
+
+                        # sleep remainder of loop interval
+                        elapsed = time.time() - loop_start
+                        sleep_t = loop_dt - elapsed
+                        if sleep_t > 0:
+                            time.sleep(sleep_t)
+                        continue  # skip the fallback below
+
+                    else:
+                        # our target id dropped out this frame - hold position
+                        set_rc_override(master, RC_CENTER, RC_CENTER, thr)
+
+            else:
+                # ---- no marker visible ----
+                if target_id is None:
+                    # still searching - reset confirm counter, hold position
+                    confirm_count = 0
+                    set_rc_override(master, RC_CENTER, RC_CENTER, thr)
+                else:
+                    # lost sight of locked marker - hold position until it reappears
+                    set_rc_override(master, RC_CENTER, RC_CENTER, thr)
+
+            # draw the frame either way for the preview window
+            if target_id is None:
+                elapsed_search = (time.time() - center_timer) if center_timer else 0
+                status = (f"SEARCHING  confirm:{confirm_count}/{CONFIRM_NEEDED}  "
+                          f"Alt:{alt:.2f}m")
+            else:
+                status = f"MARKER LOST - HOLDING  ID:{target_id}  Alt:{alt:.2f}m"
+
+            display = draw_overlay(frame, corners, ids, status,
+                                   camera_matrix, dist_coeffs,
+                                   target_id=target_id,
+                                   frame_w=frame_w, frame_h=frame_h)
+            cv2.imshow(WINDOW_NAME, display)
+            cv2.waitKey(1)
+
+            elapsed = time.time() - loop_start
+            sleep_t = loop_dt - elapsed
+            if sleep_t > 0:
+                time.sleep(sleep_t)
+
+        ##################################################################
+        # PHASE 4: RE-CENTER ON MARKER THEN LAND
+        # keeps correcting until the marker is inside the deadband on BOTH
+        # axes, then switches to LAND mode
+        # this ensures the drone lands ON the marker, not just nearby
+        ##################################################################
+        print(f"\n--- PHASE 4: FINAL CENTERING BEFORE LAND ---")
+        bridge.send_message("PHASE 4: CENTERING FOR LAND")
+
+        LAND_DEADBAND = PIXEL_DEADBAND * 1.5  # slightly relaxed deadband for land gate
+        centered = False
+
+        while not centered:
+            loop_start = time.time()
 
             alt = get_lidar_alt(master)
-            if alt < TARGET_ALT - 0.1:
-                set_throttle(master, THROTTLE_HOVER + 100)
-            elif alt > TARGET_ALT + 0.1:
-                set_throttle(master, THROTTLE_HOVER - 100)
-            else:
-                set_throttle(master, THROTTLE_HOVER)
+            thr = throttle_hold(alt)
 
-            time.sleep(0.1)
+            frame = grab_frame(cam, zed_image)
+            if frame is None:
+                set_rc_override(master, RC_CENTER, RC_CENTER, thr)
+                time.sleep(0.05)
+                continue
 
-        # ==========================================
-        # PHASE 3: IN-AIR ARUCO LAND TRIGGER
-        # hover and hold altitude while scanning for the marker
-        # the moment the marker is seen, we initiate landing
-        # no timeout - it waits as long as needed
-        # ==========================================
-        print("\n--- PHASE 3: HOVERING - SHOW MARKER TO LAND ---")
-        bridge.send_message("PHASE 3: SHOW MARKER TO LAND")
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            corners, ids, _ = detector.detectMarkers(gray)
 
-        cam = open_zed()  # reopen the camera for the land trigger scan
-        if cam is None:
-            # camera failed - just land anyway rather than hover forever
-            print("[!] ZED failed to open for land trigger. Landing now.")
-        else:
-            # keep sending throttle while the zed scans
-            # we do this by checking the camera and sending throttle on each loop iteration
-            zed_image = sl.Mat()
-            scan_start = time.time()
-            land_trigger_seen = False
+            if ids is not None and len(ids) > 0:
+                id_list = ids.flatten().tolist()
+                if target_id in id_list:
+                    idx = id_list.index(target_id)
+                    cx, cy = marker_center(corners[idx])
+                    roll_pwm, pitch_pwm, ex, ey = compute_correction(cx, cy, frame_w, frame_h)
 
-            # open the preview window for the land trigger phase
-            cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(WINDOW_NAME, 1280, 720)
+                    both_centered = abs(ex) <= LAND_DEADBAND and abs(ey) <= LAND_DEADBAND
 
-            print("[ArUco] Hovering and scanning for land trigger marker...")
-
-            while not land_trigger_seen:
-                # altitude hold - must send every cycle or drone drops
-                alt = get_lidar_alt(master)
-                if alt < TARGET_ALT - 0.1:
-                    set_throttle(master, THROTTLE_HOVER + 100)
-                elif alt > TARGET_ALT + 0.1:
-                    set_throttle(master, THROTTLE_HOVER - 100)
-                else:
-                    set_throttle(master, THROTTLE_HOVER)
-
-                # scan one frame
-                if cam.grab() == sl.ERROR_CODE.SUCCESS:
-                    cam.retrieve_image(zed_image, sl.VIEW.LEFT)
-                    frame = zed_image.get_data()
-                    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-                    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-
-                    corners, ids, _ = detector.detectMarkers(gray)
-
-                    if ids is not None and len(ids) > 0:
-                        land_id = int(ids[0][0])
-                        print(f"\n[ArUco] Land trigger marker seen! ID:{land_id} - Initiating landing.")
-                        bridge.send_message(f"LAND TRIGGER: ID {land_id}")
-
-                        # show the final detection frame with a LANDING status before closing
-                        final_status = f"LAND TRIGGER  DETECTED ID:{land_id} - LANDING NOW"
-                        display = draw_scan_overlay(frame_bgr, corners, ids, final_status)
-                        cv2.imshow(WINDOW_NAME, display)
-                        cv2.waitKey(500)  # hold the final frame for half a second so you can see it
-                        cv2.destroyWindow(WINDOW_NAME)
-
-                        land_trigger_seen = True  # exit the scan loop
+                    if both_centered:
+                        # we are centered - stop all movement and prepare to land
+                        set_rc_override(master, RC_CENTER, RC_CENTER, thr)
+                        print(f"\n[ArUco] Centered on ID:{target_id} (err:{ex:.0f},{ey:.0f}). Landing!")
+                        bridge.send_message(f"CENTERED: LANDING NOW")
+                        centered = True
                     else:
-                        elapsed = time.time() - scan_start
-                        status = f"LAND TRIGGER  Hovering, show marker to land...  {elapsed:.1f}s  Alt:{alt:.2f}m"
-                        display = draw_scan_overlay(frame_bgr, corners, ids, status)
-                        cv2.imshow(WINDOW_NAME, display)
-                        cv2.waitKey(1)  # must call or window freezes
-                        print(f" [ArUco] Hovering, waiting for marker... {elapsed:.1f}s  Alt:{alt:.2f}m", end='\r')
+                        # still drifting - keep correcting
+                        set_rc_override(master, roll_pwm, pitch_pwm, thr)
+                        print(
+                            f" [Land Gate] Centering...  err:({ex:.0f},{ey:.0f})  "
+                            f"need < {LAND_DEADBAND:.0f}px  Alt:{alt:.2f}m",
+                            end='\r'
+                        )
 
-                time.sleep(0.1)  # 10hz - matches the altitude hold loop rate from mission4
+                    status = (f"FINAL CENTER  err:({ex:.0f},{ey:.0f})  "
+                              f"need<{LAND_DEADBAND:.0f}px  Alt:{alt:.2f}m"
+                              + ("  -> LANDING" if both_centered else ""))
+                    display = draw_overlay(frame, corners, ids, status,
+                                           camera_matrix, dist_coeffs,
+                                           target_id=target_id,
+                                           frame_w=frame_w, frame_h=frame_h)
+                else:
+                    # target not in frame, hold and wait
+                    set_rc_override(master, RC_CENTER, RC_CENTER, thr)
+                    display = draw_overlay(frame, corners, ids,
+                                           f"FINAL CENTER - TARGET LOST  Alt:{alt:.2f}m",
+                                           camera_matrix, dist_coeffs,
+                                           target_id=target_id,
+                                           frame_w=frame_w, frame_h=frame_h)
+            else:
+                set_rc_override(master, RC_CENTER, RC_CENTER, thr)
+                display = draw_overlay(frame, None, None,
+                                       f"FINAL CENTER - NO MARKER  Alt:{alt:.2f}m",
+                                       camera_matrix, dist_coeffs,
+                                       frame_w=frame_w, frame_h=frame_h)
 
-            cam.close()
-            print("[ZED] Camera closed after land trigger.")
+            cv2.imshow(WINDOW_NAME, display)
+            cv2.waitKey(1)
 
-        # ==========================================
-        # LAND - same as original mission4 landing
-        # ==========================================
-        print("\nLanding sequence engaged...")
+            elapsed = time.time() - loop_start
+            sleep_t = loop_dt - elapsed
+            if sleep_t > 0:
+                time.sleep(sleep_t)
+
+        ##################################################################
+        # LAND  (same confirmed pattern from mission4)
+        ##################################################################
+        print("\n[FC] Landing sequence engaged...")
         change_mode(master, "LAND")
-        set_throttle(master, 0)  # release override so autopilot takes over
+        set_rc_override(master, RC_CENTER, RC_CENTER, 0, RC_CENTER)  # release all overrides
 
         while True:
             alt = get_lidar_alt(master)
             print(f" Land Alt: {alt:.2f}m", end='\r')
+
+            frame = grab_frame(cam, zed_image)
+            if frame is not None:
+                display = draw_overlay(frame, None, None,
+                                       f"LANDING  Alt:{alt:.2f}m",
+                                       camera_matrix, dist_coeffs,
+                                       frame_w=frame_w, frame_h=frame_h)
+                cv2.imshow(WINDOW_NAME, display)
+                cv2.waitKey(1)
+
             msg = master.recv_match(type='HEARTBEAT', blocking=False)
             if msg and not (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
-                print("\nTouchdown confirmed. Motors stopped.")
+                print("\n[FC] Touchdown confirmed. Motors stopped.")
                 break
             time.sleep(0.5)
 
     except KeyboardInterrupt:
-        print("\n[!] Emergency: User Triggered Landing...")
+        print("\n[!] EMERGENCY: User triggered landing...")
         change_mode(master, "LAND")
-        set_throttle(master, 0)
+        set_rc_override(master, RC_CENTER, RC_CENTER, 0, RC_CENTER)
         time.sleep(1)
+
     finally:
-        cv2.destroyAllWindows()  # close any open preview windows cleanly
+        cv2.destroyAllWindows()
+        cam.close()
+        print("[ZED] Camera closed.")
         bridge.stop()
-        print("Mission finalized.")
+        print("Mission 5 finalized.")
 
 if __name__ == "__main__":
     main()
