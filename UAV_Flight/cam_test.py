@@ -287,6 +287,9 @@ def main():
     """Test the vision system"""
     print("UAV Vision System Test")
     print("Press 'q' to quit")
+
+    OFFSET_CHECK_INTERVAL = 5.0  # seconds, change this to adjust wait time
+    last_offset_print_time = 0.0
     
     vision = UAVVision(calibration_file="calibration_chessboard.yaml",
                       marker_size=0.1,
@@ -294,32 +297,29 @@ def main():
     
     try:
         while True:
-            positions, frame, corners, ids = vision.process_frame(display=True)
+            positions, frame = vision.process_frame(display=True)
             
-            if positions and frame is not None and ids is not None:
+            current_time = time.time()
+
+            if positions and frame is not None and (current_time - last_offset_print_time >= OFFSET_CHECK_INTERVAL):
                 frame_h, frame_w = frame.shape[:2]
                 frame_center_x = frame_w / 2.0
                 frame_center_y = frame_h / 2.0
 
-                # Print detected markers as offset from image center instead of pose location
-                for i, pos in enumerate(positions):
-                    marker_corners = corners[i][0]
-                    marker_center = np.mean(marker_corners, axis=0)
-                    dx = marker_center[0] - frame_center_x
-                    dy = marker_center[1] - frame_center_y
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                corners, ids, _ = aruco.detectMarkers(gray, vision.detector.aruco_dict)
 
-                    print(f"Marker {pos.marker_id}: "
-                          f"center offset dx={dx:.1f}px, dy={dy:.1f}px")
-                
-                # Check if target marker found
-                target_index = next((i for i, p in enumerate(positions) if p.marker_id == 0), None)
-                if target_index is not None:
-                    marker_corners = corners[target_index][0]
-                    marker_center = np.mean(marker_corners, axis=0)
-                    dx = marker_center[0] - frame_center_x
-                    dy = marker_center[1] - frame_center_y
+                if ids is not None:
+                    for i, marker_id in enumerate(ids.flatten()):
+                        marker_corners = corners[i][0]
+                        marker_center = np.mean(marker_corners, axis=0)
 
-                    print(f">>> TARGET FOUND offset from center: dx={dx:.1f}px, dy={dy:.1f}px")
+                        dx = marker_center[0] - frame_center_x
+                        dy = marker_center[1] - frame_center_y
+
+                        print(f"Marker {int(marker_id)} offset from center: dx={dx:.1f}px, dy={dy:.1f}px")
+
+                last_offset_print_time = current_time
             
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
