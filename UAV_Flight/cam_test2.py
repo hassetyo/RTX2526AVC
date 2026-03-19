@@ -1,401 +1,458 @@
-from pymavlink import mavutil  # using the confirmed mavlink pattern instead of dronekit
-import time                    # for timing and sleeps
-import sys                     # for clean exits
-import v2v_bridge              # our custom radio bridge talker
-import cv2                     # for aruco detection
-import pyzed.sl as sl          # zed 2 sdk on jetson nano
+"""
+UAV Vision Module for ArUco Marker Detection
+Detects markers and provides position data for UAV-UGV coordination
+"""
+import cv2
+import cv2.aruco as aruco
+import numpy as np
+from dataclasses import dataclass
+from typing import Optional, Tuple, List
 
-# uav mission 4 - autonomous flight (throttle override) + ugv circle
-# this uses the pattern the user confirmed works (stabilize + rc override)
+@dataclass
+class MarkerPosition:
+    """Data class for marker position information"""
+    marker_id: int
+    x: float  # Side distance (meters)
+    y: float  # Forward distance (meters)
+    z: float  # Height distance (meters)
+    distance: float  # Total distance (meters)
+    detected: bool = True
 
-################################# config stuff i setup
-# connection settings from your working test script
-CONNECTION_STRING = "/dev/ttyACM0"   # drone wire (use COM4 if testing on windows)
-BAUD_RATE = 57600                    # using the confirmed 57600 speed
-ESP32_PORT = "/dev/ttyUSB0"          # the radio bridge usb wire
+class CameraInterface:
+    """Handles camera initialization and frame capture"""
+    
+    def __init__(self, use_zed: bool = False, camera_index: int = 0):
+        self.use_zed = use_zed
+        self.camera_index = camera_index
+        self.cap = None
+        self.zed = None
+        print(f"Initializing {'ZED' if use_zed else 'Standard'} camera...")
+        
+        if self.use_zed:
+            self._initialize_zed()
+        else:
+            self._initialize_standard()
+        
+        print("Camera initialized successfully")
+    
+    def _initialize_zed(self):
+        """Initialize ZED camera"""
+        import pyzed.sl as sl
+        self.zed = sl.Camera()
+        init_params = sl.InitParameters()
+        init_params.camera_resolution = sl.RESOLUTION.HD1080
+        init_params.depth_mode = sl.DEPTH_MODE.NONE
+        self.zed.set_camera_settings(sl.VIDEO_SETTINGS.EXPOSURE, 1)
+        
+        status = self.zed.open(init_params)
+        if status != sl.ERROR_CODE.SUCCESS:
+            raise RuntimeError(f"ZED camera error: {status}")
+    
+    def _initialize_standard(self):
+        """Initialize standard USB camera"""
+        self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_AVFOUNDATION)
+        if not self.cap.isOpened():
+            raise RuntimeError("Failed to open standard camera")
+        
+        # Set resolution
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-# mission params
-TARGET_ALT = 1.3    # hover height in meters (4.2 ft)
-CIRCLE_TIME = 18.0  # duration for the rover maneuvers
+    def get_frame(self) -> Optional[np.ndarray]:
+        """Capture a frame from the camera"""
+        if self.use_zed:
+            return self._get_zed_frame()
+        else:
+            return self._get_standard_frame()
+    
+    def _get_zed_frame(self) -> Optional[np.ndarray]:
+        """Get frame from ZED camera"""
+        import pyzed.sl as sl
+        if self.zed.grab() != sl.ERROR_CODE.SUCCESS:
+            print("Error grabbing ZED frame")
+            return None
+        
+        image = sl.Mat()
+        self.zed.retrieve_image(image, sl.VIEW.LEFT)
+        frame = image.get_data()
+        return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+    
+    def _get_standard_frame(self) -> Optional[np.ndarray]:
+        """Get frame from standard camera"""
+        ret, frame = self.cap.read()
+        if not ret:
+            print("Error grabbing standard frame")
+            return None
+        return frame
+    
+    def close(self):
+        """Release camera resources"""
+        if self.use_zed and self.zed:
+            self.zed.close()
+        elif self.cap:
+            self.cap.release()
+        cv2.destroyAllWindows()
 
-# throttle settings i tuned
-THROTTLE_MIN = 1000   # motors off
-THROTTLE_IDLE = 1150  # props spinning but no lift
-THROTTLE_CLIMB = 1650 # power to lift off the floor
-THROTTLE_HOVER = 1500 # rough middle ground for holding height
 
-# aruco settings
-ARUCO_DICT_TYPE = cv2.aruco.DICT_4X4_50  # marker dictionary type (change to match your printed marker)
-ARUCO_SCAN_TIMEOUT = 30.0                # max seconds to wait for a marker before aborting mission
-
-WINDOW_NAME = "ZED ArUco View"
-
-############################ the mavlink helpers i wrote
-
-def change_mode(master, mode: str):  # changes the flight controller mode
-    mapping = master.mode_mapping()  # ask for the list of modes
-    if mode not in mapping:          # if the mode is fake
-        print(f"Unknown mode '{mode}'")  # log the error
-        return False                 # bail out
-    mode_id = mapping[mode]          # find the secret mode id
-    master.mav.set_mode_send(
-        master.target_system,
-        mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-        mode_id
-    )  # blast it
-    print(f"Mode set: {mode}")       # log the change
-    time.sleep(1)                    # wait for the mode to settle
-    return True
-
-def arm_drone(master):  # engages the scary drone motors
-    master.mav.command_long_send(
-        master.target_system, master.target_component,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0, 0, 0, 0, 0, 0
-    )
-    print("Arming motors...")  # log the arming
-    time.sleep(2)              # wait for the spinning to start
-
-def disarm_drone(master):  # stops the motors securely
-    master.mav.command_long_send(
-        master.target_system, master.target_component,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 0, 0, 0, 0, 0, 0
-    )
-    print("Disarmed.")  # log the safety
-
-def set_throttle(master, pwm):  # physically pushes the throttle via rc override
-    # channel 3 is the throttle in ardupilot
-    master.mav.rc_channels_override_send(
-        master.target_system, master.target_component,
-        0, 0, pwm, 0, 0, 0, 0, 0
-    )
-
-def get_lidar_alt(master):  # checks the floor distance via lidar
-    msg = master.recv_match(type='DISTANCE_SENSOR', blocking=True, timeout=1.0)  # wait for lidar packet
-    if msg:  # if we got a real message
-        return msg.current_distance / 100.0  # return height in meters
-    return 0.0  # return zero if lidar is dead
-
-############################ zed + popup helpers
-
-def open_zed_camera():
-    print("[ZED] Opening camera...")
-
-    cam = sl.Camera()
-    init_params = sl.InitParameters()
-    init_params.camera_resolution = sl.RESOLUTION.HD720
-    init_params.camera_fps = 30
-    init_params.depth_mode = sl.DEPTH_MODE.NONE
-
-    status = cam.open(init_params)
-    if status != sl.ERROR_CODE.SUCCESS:
-        print(f"[ZED] Open failed: {status}")
-        return None
-
-    print("[ZED] Camera opened.")
-    return cam
-
-def create_aruco_detector():
-    aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_TYPE)
-    aruco_params = cv2.aruco.DetectorParameters()
-    return cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
-
-def get_zed_frame(cam):
-    zed_image = sl.Mat()
-    if cam.grab() != sl.ERROR_CODE.SUCCESS:
-        return None
-    cam.retrieve_image(zed_image, sl.VIEW.LEFT)
-    frame = zed_image.get_data()
-    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-    return frame_bgr
-
-def update_camera_popup(cam, detector=None, status_text="", alt_text="", marker_text=""):
+class CenterZone:
     """
-    Grab one frame, optionally run ArUco detection, draw overlays, and keep popup alive.
-    Returns: frame_bgr, corners, ids, key
+    Defines a rectangular zone around the frame center.
+    A marker inside the zone is considered 'on target'.
     """
-    frame_bgr = get_zed_frame(cam)
-    if frame_bgr is None:
-        return None, None, None, -1
 
-    corners, ids = None, None
-    if detector is not None:
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = detector.detectMarkers(gray)
-        if ids is not None and len(ids) > 0:
-            cv2.aruco.drawDetectedMarkers(frame_bgr, corners, ids)
+    def __init__(self, box_width: int = 200, box_height: int = 200):
+        """
+        Args:
+            box_width:  Total width of the acceptance box in pixels.
+            box_height: Total height of the acceptance box in pixels.
+        """
+        self.box_width = box_width
+        self.box_height = box_height
 
-    # text overlays
-    y = 35
-    if status_text:
-        cv2.putText(frame_bgr, status_text, (20, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
-        y += 35
+    def resize(self, box_width: int, box_height: int):
+        """Update the box dimensions at runtime."""
+        self.box_width = box_width
+        self.box_height = box_height
+        print(f"Center zone resized to {box_width}x{box_height}px")
 
-    if alt_text:
-        cv2.putText(frame_bgr, alt_text, (20, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        y += 35
+    def bounds(self, frame_w: int, frame_h: int) -> Tuple[int, int, int, int]:
+        """
+        Return pixel coordinates of the box edges.
 
-    if marker_text:
-        cv2.putText(frame_bgr, marker_text, (20, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        y += 35
-
-    cv2.putText(frame_bgr, "Press q to abort/quit", (20, frame_bgr.shape[0] - 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
-    cv2.imshow(WINDOW_NAME, frame_bgr)
-    key = cv2.waitKey(1) & 0xFF
-
-    return frame_bgr, corners, ids, key
-
-############################ aruco scan via zed 2
-
-def scan_aruco_marker(cam, detector):
-    """
-    Uses the already-open ZED 2 camera and scans for any ArUco marker from the configured dictionary.
-    Keeps the popup open the whole time.
-    Returns the detected marker ID (int) on success, or None on timeout.
-    """
-    detected_id = None
-    scan_start = time.time()
-    print(f"[ArUco] Scanning for marker... (timeout: {ARUCO_SCAN_TIMEOUT}s)")
-
-    while True:
-        elapsed = time.time() - scan_start
-        if elapsed >= ARUCO_SCAN_TIMEOUT:
-            print(f"[ArUco] Timeout after {ARUCO_SCAN_TIMEOUT}s. No marker found.")
-            break
-
-        frame_bgr, corners, ids, key = update_camera_popup(
-            cam,
-            detector=detector,
-            status_text=f"[ArUco] Scanning... {elapsed:.1f}s",
-            marker_text="Looking for marker..."
+        Returns:
+            (x_min, y_min, x_max, y_max)
+        """
+        cx, cy = frame_w / 2.0, frame_h / 2.0
+        half_w = self.box_width / 2.0
+        half_h = self.box_height / 2.0
+        return (
+            int(cx - half_w),
+            int(cy - half_h),
+            int(cx + half_w),
+            int(cy + half_h),
         )
 
-        if key == ord('q'):
-            print("[ArUco] User quit scan window.")
-            break
+    def contains(self, dx: float, dy: float) -> bool:
+        """
+        Check whether a marker offset (dx, dy from frame centre) falls inside
+        the box.  dx/dy are signed pixel offsets – sign convention matches
+        OpenCV (right is +x, down is +y).
+        """
+        return (abs(dx) <= self.box_width / 2.0 and
+                abs(dy) <= self.box_height / 2.0)
 
-        if ids is not None and len(ids) > 0:
-            detected_id = int(ids[0][0])
-            print(f"[ArUco] Marker detected! ID: {detected_id}")
+    def draw(self, frame: np.ndarray, in_zone: bool) -> np.ndarray:
+        """
+        Draw the centre-zone box on *frame* in-place.
 
-            # redraw one more time with detected id
-            update_camera_popup(
-                cam,
-                detector=detector,
-                status_text="[ArUco] Marker detected!",
-                marker_text=f"Detected ID: {detected_id}"
+        Box is green when the target marker is inside, red when outside (or
+        not detected).
+        """
+        h, w = frame.shape[:2]
+        x_min, y_min, x_max, y_max = self.bounds(w, h)
+        color = (0, 255, 0) if in_zone else (0, 0, 255)
+        cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), color, 2)
+
+        label = "IN ZONE" if in_zone else "OUT OF ZONE"
+        cv2.putText(frame, label, (x_min, y_min - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
+        return frame
+
+
+class ArucoDetector:
+    """Handles ArUco marker detection and pose estimation"""
+    
+    def __init__(self, calibration_file: str, marker_size: float = 0.1,
+                 dictionary=aruco.DICT_6X6_1000):
+        """
+        Initialize ArUco detector
+        
+        Args:
+            calibration_file: Path to camera calibration YAML file
+            marker_size: Physical size of markers in meters
+            dictionary: ArUco dictionary to use
+        """
+        self.marker_size = marker_size
+        self.aruco_dict = aruco.getPredefinedDictionary(dictionary)
+        self.camera_matrix, self.dist_coeffs = self._load_calibration(calibration_file)
+        print(f"Loaded calibration from {calibration_file}")
+        print(f"Marker size: {marker_size}m, Dictionary: DICT_6X6_1000")
+    
+    def _load_calibration(self, file_path: str) -> Tuple[np.ndarray, np.ndarray]:
+        """Load camera calibration from YAML file"""
+        fs = cv2.FileStorage(file_path, cv2.FILE_STORAGE_READ)
+        camera_matrix = fs.getNode("K").mat()
+        dist_coeffs = fs.getNode("D").mat()
+        fs.release()
+        
+        if camera_matrix is None or dist_coeffs is None:
+            raise ValueError(f"Invalid calibration file: {file_path}")
+        
+        return camera_matrix, dist_coeffs
+    
+    def detect(self, frame: np.ndarray) -> List[MarkerPosition]:
+        """
+        Detect ArUco markers and estimate their positions
+        
+        Args:
+            frame: Input image frame
+        
+        Returns:
+            List of MarkerPosition objects for detected markers
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        corners, ids, _ = aruco.detectMarkers(gray, self.aruco_dict)
+        
+        positions = []
+        
+        if ids is not None:
+            for i, marker_id in enumerate(ids.flatten()):
+                rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(
+                    corners[i], self.marker_size, 
+                    self.camera_matrix, self.dist_coeffs
+                )
+                
+                tvec = tvecs[0].flatten()
+                x, y, z = tvec[0], tvec[1], tvec[2]
+                distance = np.linalg.norm(tvec)
+                
+                position = MarkerPosition(
+                    marker_id=int(marker_id),
+                    x=float(x),
+                    y=float(y),
+                    z=float(z),
+                    distance=float(distance)
+                )
+                positions.append(position)
+        
+        return positions
+    
+    def draw_detections(self, frame: np.ndarray, positions: List[MarkerPosition]) -> np.ndarray:
+        """
+        Draw detected markers and their information on the frame
+        
+        Args:
+            frame: Input frame
+            positions: List of detected marker positions
+        
+        Returns:
+            Annotated frame
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        corners, ids, _ = aruco.detectMarkers(gray, self.aruco_dict)
+        
+        if ids is not None:
+            # Draw marker boundaries
+            frame = aruco.drawDetectedMarkers(frame, corners, ids)
+            
+            # Draw axes and labels for each marker
+            for i, marker_id in enumerate(ids.flatten()):
+                rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(
+                    corners[i], self.marker_size,
+                    self.camera_matrix, self.dist_coeffs
+                )
+                
+                rvec = rvecs[0].flatten()
+                tvec = tvecs[0].flatten()
+                
+                # Draw 3D axes
+                cv2.drawFrameAxes(frame, self.camera_matrix, self.dist_coeffs,
+                                rvec, tvec, self.marker_size * 0.5)
+                
+                # Find matching position data
+                position = next((p for p in positions if p.marker_id == marker_id), None)
+                if position:
+                    # Add label
+                    corner = corners[i][0]
+                    center = np.mean(corner, axis=0).astype(int)
+                    
+                    color = (0, 255, 0) if marker_id == 0 else (0, 0, 255)
+                    label = f"ID:{marker_id} D:{position.distance:.2f}m"
+                    
+                    cv2.putText(frame, label, tuple(center), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
+        
+        return frame
+
+
+class UAVVision:
+    """Main vision system for UAV"""
+    
+    def __init__(self, calibration_file: str = "calibration_chessboard.yaml",
+                 marker_size: float = 0.1, use_zed: bool = False,
+                 zone_box_width: int = 200, zone_box_height: int = 200):
+        """
+        Initialize UAV vision system
+
+        Args:
+            calibration_file:  Path to calibration file
+            marker_size:       Marker size in meters
+            use_zed:           Use ZED camera if True, standard camera if False
+            zone_box_width:    Width of the centre-zone acceptance box (pixels)
+            zone_box_height:   Height of the centre-zone acceptance box (pixels)
+        """
+        self.camera = CameraInterface(use_zed=use_zed)
+        self.detector = ArucoDetector(calibration_file, marker_size)
+        self.target_marker_id = 0  # Default target marker ID
+        self.center_zone = CenterZone(zone_box_width, zone_box_height)
+    
+    def get_target_position(self) -> Optional[MarkerPosition]:
+        """
+        Get position of the target marker (ID 0 by default)
+        
+        Returns:
+            MarkerPosition if target found, None otherwise
+        """
+        frame = self.camera.get_frame()
+        if frame is None:
+            return None
+        
+        positions = self.detector.detect(frame)
+        
+        # Find target marker
+        target = next((p for p in positions if p.marker_id == self.target_marker_id), None)
+        return target
+    
+    def process_frame(self, display: bool = True) -> Tuple[Optional[List[MarkerPosition]], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        Process a single frame: detect markers and optionally display
+        
+        Args:
+            display: If True, show annotated frame
+        
+        Returns:
+            Tuple of (positions list, annotated frame, corners, ids)
+        """
+        frame = self.camera.get_frame()
+        if frame is None:
+            return None, None, None, None
+        
+        positions = self.detector.detect(frame)
+        annotated_frame = self.detector.draw_detections(frame.copy(), positions)
+
+        # Reuse same detection logic to get marker image centers
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        corners, ids, _ = aruco.detectMarkers(gray, self.detector.aruco_dict)
+
+        frame_h, frame_w = annotated_frame.shape[:2]
+        frame_center_x = frame_w / 2.0
+        frame_center_y = frame_h / 2.0
+
+        # Determine whether the target marker is inside the zone (for box colour)
+        target_in_zone = False
+        if ids is not None:
+            target_index = next(
+                (i for i, mid in enumerate(ids.flatten())
+                 if mid == self.target_marker_id), None
             )
-            break
+            if target_index is not None:
+                mc = np.mean(corners[target_index][0], axis=0)
+                dx = mc[0] - frame_center_x
+                dy = mc[1] - frame_center_y
+                target_in_zone = self.center_zone.contains(dx, dy)
 
-        time.sleep(0.05)
+        if display:
+            # Draw centre-zone box (green = in zone, red = out / not detected)
+            self.center_zone.draw(annotated_frame, target_in_zone)
 
-    return detected_id
+            # Draw a small crosshair at the exact frame centre
+            cx, cy = int(frame_center_x), int(frame_center_y)
+            cv2.drawMarker(annotated_frame, (cx, cy), (255, 255, 255),
+                           cv2.MARKER_CROSS, 20, 1, cv2.LINE_AA)
 
-#################### the main mission 4 logic
+            # Add pose overlay text
+            for i, pos in enumerate(positions):
+                info = (f"ID {pos.marker_id}: "
+                        f"X:{pos.x:.2f} Y:{pos.y:.2f} Z:{pos.z:.2f} "
+                        f"D:{pos.distance:.2f}m")
+                cv2.putText(annotated_frame, info, (10, 30 + i * 30),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+            
+            cv2.imshow("UAV Vision", annotated_frame)
+        
+        return positions, annotated_frame, corners, ids
+    
+    def close(self):
+        """Cleanup resources"""
+        self.camera.close()
 
-def main():  # the main boss function
-    print("==========================================")  # header
-    print("   UAV MISSION 4 - CONFIRMED MAVLINK PATTERN")  # title
-    print("==========================================")  # footer
 
-    cam = None
-    bridge = None
+def main():
+    """Test the vision system"""
+    print("UAV Vision System Test")
+    print("Press 'q' to quit")
+    print("Press '+' / '-' to grow or shrink the centre zone by 20px")
 
-    # step 1: connect to the wires
-    print(f"Connecting to Drone: {CONNECTION_STRING}...")  # login
-    master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE)  # open link
-    master.wait_heartbeat()  # wait for buzz
-    print("Drone Heartbeat OK.")  # success
+    # ── Tweak the box size here ──────────────────────────────────────────────
+    ZONE_BOX_WIDTH  = 200   # pixels
+    ZONE_BOX_HEIGHT = 200   # pixels
+    # ────────────────────────────────────────────────────────────────────────
 
+    vision = UAVVision(
+        calibration_file="calibration_chessboard.yaml",
+        marker_size=0.1,
+        use_zed=False,
+        zone_box_width=ZONE_BOX_WIDTH,
+        zone_box_height=ZONE_BOX_HEIGHT,
+    )
+    
     try:
-        # open camera once and keep popup alive the entire mission
-        cam = open_zed_camera()
-        if cam is None:
-            return
+        while True:
+            positions, frame, corners, ids = vision.process_frame(display=True)
+            
+            if positions and frame is not None and ids is not None:
+                frame_h, frame_w = frame.shape[:2]
+                frame_center_x = frame_w / 2.0
+                frame_center_y = frame_h / 2.0
 
-        detector = create_aruco_detector()
-        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+                for i, pos in enumerate(positions):
+                    marker_corners = corners[i][0]
+                    marker_center = np.mean(marker_corners, axis=0)
+                    dx = marker_center[0] - frame_center_x
+                    dy = marker_center[1] - frame_center_y
+                    in_zone = vision.center_zone.contains(dx, dy)
 
-        # show a live frame immediately
-        update_camera_popup(
-            cam,
-            detector=detector,
-            status_text="Camera online",
-            marker_text="Preparing mission..."
-        )
+                    if in_zone:
+                        print(f"Marker {pos.marker_id}: INSIDE zone "
+                              f"(dx={dx:.1f}px, dy={dy:.1f}px)")
+                    else:
+                        print(f"Marker {pos.marker_id}: OUTSIDE zone — "
+                              f"offset dx={dx:.1f}px, dy={dy:.1f}px")
 
-        bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="UAV-Bridge")  # radio bridge
-        try:  # try to open radio
-            bridge.connect()  # open serial wires
-            bridge.send_message("MISSION 4: MAVLINK MODE START")  # yell over air
-        except Exception as e:  # if radio is missing
-            print(f"Radio Bridge Fail: {e}")  # log fail
-            return  # bail
+                # Specific report for the target marker
+                target_index = next(
+                    (i for i, p in enumerate(positions)
+                     if p.marker_id == vision.target_marker_id), None
+                )
+                if target_index is not None:
+                    mc = np.mean(corners[target_index][0], axis=0)
+                    dx = mc[0] - frame_center_x
+                    dy = mc[1] - frame_center_y
+                    in_zone = vision.center_zone.contains(dx, dy)
 
-        # step 2: arm drone and scan aruco before doing anything else
-        if not change_mode(master, "STABILIZE"):
-            return
-        arm_drone(master)  # start the props
+                    if in_zone:
+                        print(">>> TARGET FOUND: inside centre zone ✓")
+                    else:
+                        print(f">>> TARGET FOUND: outside centre zone — "
+                              f"dx={dx:.1f}px, dy={dy:.1f}px")
 
-        # ---- aruco scan gate ----
-        # motors are now armed (spinning at idle). we scan for the marker before committing to flight.
-        # if we timeout without finding one we disarm cleanly and abort the mission.
-        marker_id = scan_aruco_marker(cam, detector)  # use already-open cam/popup
-
-        if marker_id is None:  # if we never found a marker
-            print("[!] No ArUco marker detected. Aborting mission and disarming.")  # log abort
-            disarm_drone(master)  # kill the motors safely
-            return  # exit mission
-
-        print(f"[ArUco] Marker ID {marker_id} confirmed. Continuing mission...")  # log go-ahead
-        bridge.send_message(f"ARUCO GATE PASSED: MARKER {marker_id}")  # broadcast over radio
-        # ---- end aruco gate ----
-
-        # step 3: takeoff sequence (using your working pattern)
-        print("Climbing to 1.3m...")  # log the climb
-        while True:  # loop until target height
-            alt = get_lidar_alt(master)  # check lidar
-            print(f" Altitude: {alt:.2f}m", end='\r')  # log height
-
-            _, _, _, key = update_camera_popup(
-                cam,
-                detector=detector,
-                status_text="Takeoff phase",
-                alt_text=f"Altitude: {alt:.2f}m",
-                marker_text=f"Marker locked: ID {marker_id}"
-            )
+            key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
-                print("\n[!] User aborted during takeoff.")
-                change_mode(master, "LAND")
-                set_throttle(master, 0)
-                time.sleep(1)
-                return
-
-            if alt >= TARGET_ALT:  # if we hit the hover point
-                set_throttle(master, THROTTLE_HOVER)  # pull back to hover power
-                print(f"\nHover altitude reached: {alt:.2f}m")  # declare success
-                break  # break the climb
-
-            set_throttle(master, THROTTLE_CLIMB)  # keep pushing up
-            time.sleep(0.1)  # quick loop
-
-        # step 4: sync with ground rover
-        print("Waiting for UGV sync...")  # logging wait
-        while True:  # loop until radio sync
-            set_throttle(master, THROTTLE_HOVER)  # MUST keep sending hover pulse or it crashes
-            data = bridge.get_telemetry()  # pull from mailbox
-
-            _, _, _, key = update_camera_popup(
-                cam,
-                detector=detector,
-                status_text="Waiting for UGV sync...",
-                alt_text=f"Altitude: {get_lidar_alt(master):.2f}m",
-                marker_text=f"Marker locked: ID {marker_id}"
-            )
-            if key == ord('q'):
-                print("\n[!] User aborted during sync wait.")
-                change_mode(master, "LAND")
-                set_throttle(master, 0)
-                time.sleep(1)
-                return
-
-            if data:  # if we got a packet
-                print("UGV Ready. Initiating Circles.")  # log coordination
-                break  # done
-            time.sleep(0.2)  # check 5 times a second to keep rc heartbeat alive
-
-        # step 5: command the rover work
-        bridge.send_command(cmdSeq=400, cmd=v2v_bridge.CMD_CIRCLE, estop=0)  # blast command
-
-        start_t = time.time()  # start clock
-        while (time.time() - start_t) < CIRCLE_TIME:  # loop for duration
-            data = bridge.get_telemetry()  # check status
-            if data:  # if real status
-                print(f" UGV Speed: {data[2]:.2f} m/s", end='\r')  # log rover stats
-
-            # small "crude" altitude hold logic i added
-            alt = get_lidar_alt(master)  # check lidar
-            if alt < TARGET_ALT - 0.1:  # if we are sinking
-                set_throttle(master, THROTTLE_HOVER + 100)  # give it more juice
-            elif alt > TARGET_ALT + 0.1:  # if we are drifting too high
-                set_throttle(master, THROTTLE_HOVER - 100)  # cut power
-            else:  # if we are golden
-                set_throttle(master, THROTTLE_HOVER)  # keep steady
-
-            ugv_text = "UGV Speed: N/A"
-            if data:
-                ugv_text = f"UGV Speed: {data[2]:.2f} m/s"
-
-            _, _, _, key = update_camera_popup(
-                cam,
-                detector=detector,
-                status_text="Circle phase running",
-                alt_text=f"Altitude: {alt:.2f}m",
-                marker_text=f"Marker ID {marker_id} | {ugv_text}"
-            )
-            if key == ord('q'):
-                print("\n[!] User aborted during circle phase.")
                 break
+            # Grow / shrink the centre zone interactively
+            elif key == ord('+') or key == ord('='):
+                w = vision.center_zone.box_width  + 20
+                h = vision.center_zone.box_height + 20
+                vision.center_zone.resize(w, h)
+            elif key == ord('-'):
+                w = max(20, vision.center_zone.box_width  - 20)
+                h = max(20, vision.center_zone.box_height - 20)
+                vision.center_zone.resize(w, h)
+    
+    finally:
+        vision.close()
+        print("Vision system closed")
 
-            time.sleep(0.1)  # 10hz loop
 
-        # step 6: land and shutdown
-        print("\nLanding sequence engaged...")  # start descent
-        change_mode(master, "LAND")  # switch to official land mode for graceful touchdown
-        set_throttle(master, 0)  # release throttle override so autopilot takes over
-
-        while True:  # loop until we hit the floor
-            alt = get_lidar_alt(master)  # check lidar
-            print(f" Land Alt: {alt:.2f}m", end='\r')  # log altitude
-
-            _, _, _, key = update_camera_popup(
-                cam,
-                detector=detector,
-                status_text="Landing...",
-                alt_text=f"Altitude: {alt:.2f}m",
-                marker_text=f"Landing after marker ID {marker_id}"
-            )
-            if key == ord('q'):
-                print("\n[Landing] q pressed, continuing landing.")
-
-            # checking if the drone disarmed itself (autopilot does this after landing)
-            msg = master.recv_match(type='HEARTBEAT', blocking=False)
-            if msg and not (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
-                print("\nTouchdown confirmed. Motors stopped.")  # log success
-                break  # exit
-            time.sleep(0.5)  # slower loop for checking
-
-    except KeyboardInterrupt:  # someone hit ctrl+c
-        print("\n[!] Emergency: User Triggered Landing...")  # abort log
-        try:
-            change_mode(master, "LAND")  # force land mode immediately
-            set_throttle(master, 0)      # release override
-            time.sleep(1)                # wait for command to hit
-        except Exception:
-            pass
-    finally:  # final chores
-        if bridge is not None:
-            try:
-                bridge.stop()  # close radio wire
-            except Exception:
-                pass
-
-        if cam is not None:
-            try:
-                cam.close()
-            except Exception:
-                pass
-
-        try:
-            cv2.destroyAllWindows()
-        except Exception:
-            pass
-
-        print("Mission finalized.")  # end log
-
-if __name__ == "__main__":  # entry point
-    main()  # run it
+if __name__ == "__main__":
+    main()
