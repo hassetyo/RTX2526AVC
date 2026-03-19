@@ -1,84 +1,96 @@
 """
-UAV ArUco Marker Follow Mission
-================================
+UAV Mission 5 - Vision Guided ArUco Follow
+============================================
 Flow:
-  1. Connect to flight controller via MAVLink
-  2. Arm + climb to TARGET_ALT using throttle RC override (STABILIZE mode)
-  3. Hold hover and scan for ArUco marker ID 0
-  4. If the marker centre is OUTSIDE the acceptance box, nudge roll/pitch
-     RC channels to re-centre — with a cooldown so we don't spam commands
-  5. Ctrl-C triggers a clean LAND + disarm
+  Phase 1 — Arm + climb to TARGET_ALT
+  Phase 2 — Fly forward ~5 m (timed pitch override)
+  Phase 3 — Scan for ArUco marker, then centre on it for CENTER_HOLD_TIME seconds
+             Corrections use real tvec metres from pose estimation (not pixel offsets)
+             A cooldown gate prevents spamming the flight controller
+  Phase 4 — Final re-centre tightened to LAND_DEADBAND, then switch to LAND mode
+  Land    — Wait for autopilot to confirm disarm
 
-RC channel mapping (ArduPilot default):
-  CH1 = Roll       (1500 = centre, <1500 = left,  >1500 = right)
-  CH2 = Pitch      (1500 = centre, <1500 = fwd,   >1500 = back)
-  CH3 = Throttle   (raw PWM)
-  CH4 = Yaw        (1500 = centre)
+Camera / vision is handled entirely by UAVVision from uav_vision.py.
+That module is imported and used exactly as-is — do NOT change any camera
+settings here; they live in uav_vision.py (HD1080, DEPTH_MODE.NONE, exposure=1).
 
-All channels we are NOT touching are sent as 0, which tells ArduPilot to
-ignore them and use whatever the sticks say (or the last override value).
+MAVLink pattern is the same confirmed approach from Mission4_Updated.py:
+  STABILIZE mode + RC channel override for throttle / roll / pitch.
 """
 
+# ── standard imports ──────────────────────────────────────────────────────────
 from pymavlink import mavutil
-import cv2
-import cv2.aruco as aruco
-import numpy as np
 import time
-import threading
-from dataclasses import dataclass
-from typing import Optional, Tuple, List
+import cv2
+import numpy as np
 
-################################# TUNABLE CONFIG ##################################
+# ── vision module — import everything directly so camera settings are untouched
+from uav_vision import UAVVision, MarkerPosition
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TUNABLE MISSION CONFIG
+# ═════════════════════════════════════════════════════════════════════════════
 
 # --- MAVLink ---
-CONNECTION_STRING = "/dev/ttyACM0"   # serial port to Pixhawk
-BAUD_RATE         = 57600            # confirmed working baud
+CONNECTION_STRING = "/dev/ttyACM0"
+BAUD_RATE         = 57600
 
-# --- Flight params ---
-TARGET_ALT      = 1.3   # hover height in meters
-THROTTLE_MIN    = 1000  # motors off / floor
-THROTTLE_IDLE   = 1150  # props spinning, no lift
-THROTTLE_CLIMB  = 1650  # power to climb
-THROTTLE_HOVER  = 1500  # neutral hover power
-ALT_BAND        = 0.1   # ±metres before altitude correction kicks in
-ALT_BOOST       = 100   # PWM added/removed for altitude correction
+# --- Calibration / vision ---
+CALIBRATION_FILE = "../CameraCalibration/calibration_chessboard.yaml"
+MARKER_SIZE      = 0.1          # metres — must match your printed marker
 
-# --- Camera / ArUco ---
-# ZED resolution choices: HD2K, HD1080, HD720, VGA
-ZED_RESOLUTION     = "HD720"               # lower res = faster ArUco detection
-ZED_FPS            = 60                    # 0 = SDK default for chosen resolution
-ZED_EXPOSURE       = 20                    # 1–100, low value = sharp fast-moving markers
-CALIBRATION_FILE   = "calibration_chessboard.yaml"
-MARKER_SIZE        = 0.1                   # physical marker size in metres
-ARUCO_DICT         = aruco.DICT_6X6_1000   # must match printed markers
-TARGET_MARKER_ID   = 0                     # the marker we chase
+# --- Flight ---
+TARGET_ALT     = 1.3            # hover height in metres
+THROTTLE_CLIMB = 1650           # PWM to climb
+THROTTLE_HOVER = 1500           # PWM neutral hover
+ALT_BAND       = 0.1            # ±m band before altitude correction fires
+ALT_BOOST      = 100            # PWM delta applied when outside ALT_BAND
 
-# --- Centre-zone acceptance box (pixels) ---
-ZONE_BOX_WIDTH  = 200   # total width  — shrink for tighter following
-ZONE_BOX_HEIGHT = 200   # total height — shrink for tighter following
+# --- Forward flight phase ---
+# Tune FORWARD_PITCH_PWM + FORWARD_FLIGHT_TIME so distance ≈ 5 m.
+# At ~1580 PWM expect 0.6-0.8 m/s  →  7 s ≈ 5 m
+FORWARD_PITCH_PWM   = 1580
+FORWARD_FLIGHT_TIME = 7.0       # seconds
 
-# --- Correction nudge (PWM away from 1500 neutral) ---
-# How hard each axis corrects when the marker is outside the box.
-# Start small and tune upward — too large = oscillation.
-ROLL_NUDGE    = 50   # PWM  (applied left/right to centre marker horizontally)
-PITCH_NUDGE   = 50   # PWM  (applied fwd/back   to centre marker vertically)
+# --- Marker acquisition ---
+CONFIRM_NEEDED = 3              # consecutive detections before locking onto a marker
 
-# --- Cooldown between correction commands (seconds) ---
-# The drone needs time to physically respond before we check again.
-CORRECTION_COOLDOWN = 0.8   # seconds — increase if drone oscillates
+# --- Centering PID (metre-based, uses tvec from pose estimation) ---
+# tvec x = side offset  →  roll correction
+# tvec y = fwd  offset  →  pitch correction
+# Both are 0 when drone is directly above the marker.
+KP_ROLL        = 300            # gain:  0.3 m * 300 = 90 PWM nudge
+KP_PITCH       = 300
+MAX_NUDGE      = 150            # hard cap on PWM offset from RC_CENTER
+METER_DEADBAND = 0.05           # 5 cm — ignore errors smaller than this
+
+# --- Cooldown between correction commands ---
+# Drone needs time to physically respond; don't flood it with commands.
+CORRECTION_COOLDOWN = 0.8       # seconds
+
+# --- Hold timer ---
+CENTER_HOLD_TIME = 60.0         # seconds to stay centred before land phase
+LAND_DEADBAND    = 0.075        # 7.5 cm — relaxed gate used just before landing
+
+# --- Loop rate ---
+FOLLOW_HZ = 10                  # Hz for the centering loop
+
+# --- Display ---
+WINDOW_NAME = "UAV Mission 5 - Vision Guided"
+
+# --- RC neutral ---
+RC_CENTER = 1500
 
 # --- Log file ---
-LOG_FILE = "aruco_follow_mission.log"
-
-###################################################################################
+LOG_FILE = "mission5.log"
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Logging
-# ──────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# LOGGING
+# ═════════════════════════════════════════════════════════════════════════════
 
 def log(text: str):
-    """Timestamped print + append to log file."""
     ts   = time.strftime("%H:%M:%S")
     line = f"[{ts}] {text}"
     print(line)
@@ -86,401 +98,393 @@ def log(text: str):
         f.write(line + "\n")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# MAVLink helpers  (taken directly from Mission4_Updated.py pattern)
-# ──────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# MAVLINK HELPERS  (confirmed Mission4 pattern — unchanged)
+# ═════════════════════════════════════════════════════════════════════════════
 
 def change_mode(master, mode: str):
-    """Switch ArduPilot flight mode."""
     mapping = master.mode_mapping()
     if mode not in mapping:
-        log(f"Unknown mode '{mode}'")
+        log(f"[FC] Unknown mode '{mode}'")
         return
-    mode_id = mapping[mode]
     master.mav.set_mode_send(
         master.target_system,
         mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-        mode_id,
+        mapping[mode],
     )
-    log(f"Mode set: {mode}")
+    log(f"[FC] Mode: {mode}")
     time.sleep(1)
 
 
 def arm_drone(master):
-    """Arm motors."""
     master.mav.command_long_send(
         master.target_system, master.target_component,
         mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
         0, 1, 0, 0, 0, 0, 0, 0,
     )
-    log("Arming motors...")
+    log("[FC] Arming motors...")
     time.sleep(2)
 
 
-def disarm_drone(master):
-    """Disarm motors."""
-    master.mav.command_long_send(
-        master.target_system, master.target_component,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-        0, 0, 0, 0, 0, 0, 0, 0,
-    )
-    log("Disarmed.")
-
-
-def rc_override(master, roll=0, pitch=0, throttle=0, yaw=0):
-    """
-    Send RC channel overrides.
-    Pass 0 for any channel to leave it at its current value (ArduPilot ignores 0).
-    CH1=roll  CH2=pitch  CH3=throttle  CH4=yaw
-    """
+def set_rc_override(master, roll=RC_CENTER, pitch=RC_CENTER,
+                    throttle=THROTTLE_HOVER, yaw=RC_CENTER):
+    """Send RC channel overrides CH1-4. All channels always sent explicitly."""
     master.mav.rc_channels_override_send(
         master.target_system, master.target_component,
-        roll, pitch, throttle, yaw,   # CH1-4
-        0, 0, 0, 0,                   # CH5-8 unused
+        roll, pitch, throttle, yaw,
+        0, 0, 0, 0,
     )
 
 
-def get_lidar_alt(master) -> float:
-    """Read altitude from lidar/rangefinder in metres."""
-    msg = master.recv_match(type="DISTANCE_SENSOR", blocking=True, timeout=1.0)
+def get_lidar_alt(master, blocking: bool = False) -> float:
+    msg = master.recv_match(type="DISTANCE_SENSOR",
+                            blocking=blocking, timeout=0.05)
     if msg:
         return msg.current_distance / 100.0
     return 0.0
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Vision — ArUco detection (extracted from uav_vision.py)
-# ──────────────────────────────────────────────────────────────────────────────
-
-@dataclass
-class MarkerOffset:
-    """Pixel offset of a marker centre from the frame centre."""
-    marker_id: int
-    dx: float   # positive = marker is to the RIGHT of centre
-    dy: float   # positive = marker is BELOW  centre (OpenCV coords)
+def throttle_hold(alt: float) -> int:
+    """Simple bang-bang altitude hold around TARGET_ALT."""
+    if alt < TARGET_ALT - ALT_BAND:
+        return THROTTLE_HOVER + ALT_BOOST   # sinking → more power
+    if alt > TARGET_ALT + ALT_BAND:
+        return THROTTLE_HOVER - ALT_BOOST   # too high → less power
+    return THROTTLE_HOVER
 
 
-class CenterZone:
-    """Rectangular acceptance box around the frame centre."""
+# ═════════════════════════════════════════════════════════════════════════════
+# CENTERING HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
 
-    def __init__(self, box_w: int = ZONE_BOX_WIDTH, box_h: int = ZONE_BOX_HEIGHT):
-        self.box_w = box_w
-        self.box_h = box_h
-
-    def contains(self, dx: float, dy: float) -> bool:
-        return abs(dx) <= self.box_w / 2.0 and abs(dy) <= self.box_h / 2.0
-
-    def draw(self, frame: np.ndarray, in_zone: bool) -> np.ndarray:
-        h, w = frame.shape[:2]
-        cx, cy = w // 2, h // 2
-        x1 = cx - self.box_w // 2
-        y1 = cy - self.box_h // 2
-        x2 = cx + self.box_w // 2
-        y2 = cy + self.box_h // 2
-        color  = (0, 255, 0) if in_zone else (0, 0, 255)
-        label  = "IN ZONE" if in_zone else "OUT OF ZONE"
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(frame, label, (x1, y1 - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
-        cv2.drawMarker(frame, (cx, cy), (255, 255, 255),
-                       cv2.MARKER_CROSS, 20, 1, cv2.LINE_AA)
-        return frame
-
-
-class VisionThread:
+def compute_correction(pos: MarkerPosition):
     """
-    Runs ArUco detection in a background thread so the flight-control loop
-    is never blocked waiting for a camera frame.
+    Convert tvec metres into roll/pitch PWM values.
 
-    Uses the ZED camera (left lens, BGR) via the pyzed SDK.
-    After each frame the latest MarkerOffset for TARGET_MARKER_ID (or None
-    if not detected) is available via .get_target_offset().
+    pos.x  side offset  →  roll   (right = positive x = roll right = PWM > 1500)
+    pos.y  fwd  offset  →  pitch  (forward = positive y = pitch fwd = PWM < 1500)
+
+    Note on pitch sign:
+      In the camera frame, tvec y is positive when the marker is BELOW the
+      camera (drone needs to fly forward to centre).  ArduPilot CH2 < 1500
+      means pitch forward, so we subtract the nudge.
     """
+    ex = 0.0 if abs(pos.x) < METER_DEADBAND else pos.x
+    ey = 0.0 if abs(pos.y) < METER_DEADBAND else pos.y
 
-    def __init__(self, calibration_file: str,
-                 marker_size: float, aruco_dict_id: int,
-                 target_id: int, zone: CenterZone):
-        self.target_id = target_id
-        self.zone      = zone
-        self._offset: Optional[MarkerOffset] = None
-        self._lock     = threading.Lock()
-        self._running  = False
-        self._thread   = None
-
-        # ── ZED camera setup ──────────────────────────────────────────────────
-        import pyzed.sl as sl
-        self._sl = sl   # keep reference so _loop can use it without re-importing
-
-        self.zed = sl.Camera()
-
-        init_params = sl.InitParameters()
-        # Map the string config value to the SDK enum
-        res_map = {
-            "HD2K":   sl.RESOLUTION.HD2K,
-            "HD1080": sl.RESOLUTION.HD1080,
-            "HD720":  sl.RESOLUTION.HD720,
-            "VGA":    sl.RESOLUTION.VGA,
-        }
-        init_params.camera_resolution = res_map.get(ZED_RESOLUTION, sl.RESOLUTION.HD720)
-        init_params.camera_fps        = ZED_FPS
-        init_params.depth_mode        = sl.DEPTH_MODE.NONE  # depth not needed here
-
-        status = self.zed.open(init_params)
-        if status != sl.ERROR_CODE.SUCCESS:
-            raise RuntimeError(f"ZED failed to open: {status}")
-
-        # Low exposure keeps fast-moving markers sharp
-        self.zed.set_camera_settings(sl.VIDEO_SETTINGS.EXPOSURE, ZED_EXPOSURE)
-        log(f"ZED camera opened — {ZED_RESOLUTION} @ {ZED_FPS}fps, exposure={ZED_EXPOSURE}")
-
-        # Reusable ZED image buffer
-        self._zed_image = sl.Mat()
-
-        # ── ArUco setup ───────────────────────────────────────────────────────
-        self.aruco_dict = aruco.getPredefinedDictionary(aruco_dict_id)
-        fs = cv2.FileStorage(calibration_file, cv2.FILE_STORAGE_READ)
-        self.camera_matrix = fs.getNode("K").mat()
-        self.dist_coeffs   = fs.getNode("D").mat()
-        fs.release()
-        if self.camera_matrix is None or self.dist_coeffs is None:
-            raise ValueError(f"Bad calibration file: {calibration_file}")
-        self.marker_size = marker_size
-
-    def start(self):
-        self._running = True
-        self._thread  = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-        log("Vision thread started.")
-
-    def stop(self):
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=2.0)
-        self.zed.close()
-        cv2.destroyAllWindows()
-        log("Vision thread stopped.")
-
-    def get_target_offset(self) -> Optional[MarkerOffset]:
-        """Thread-safe read of the latest target marker offset."""
-        with self._lock:
-            return self._offset
-
-    def _grab_frame(self) -> Optional[np.ndarray]:
-        """Grab one BGR frame from the ZED left lens. Returns None on error."""
-        sl = self._sl
-        if self.zed.grab() != sl.ERROR_CODE.SUCCESS:
-            return None
-        self.zed.retrieve_image(self._zed_image, sl.VIEW.LEFT)
-        # ZED returns BGRA — drop the alpha channel
-        bgra = self._zed_image.get_data()
-        return cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
-
-    def _loop(self):
-        while self._running:
-            frame = self._grab_frame()
-            if frame is None:
-                time.sleep(0.005)
-                continue
-
-            frame_h, frame_w = frame.shape[:2]
-            cx = frame_w / 2.0
-            cy = frame_h / 2.0
-
-            gray    = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            corners, ids, _ = aruco.detectMarkers(gray, self.aruco_dict)
-
-            target_offset: Optional[MarkerOffset] = None
-            in_zone = False
-
-            if ids is not None:
-                # Draw all detected markers
-                frame = aruco.drawDetectedMarkers(frame, corners, ids)
-
-                for i, mid in enumerate(ids.flatten()):
-                    mc  = np.mean(corners[i][0], axis=0)
-                    dx  = mc[0] - cx
-                    dy  = mc[1] - cy
-
-                    # Pose estimation for the distance label
-                    rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(
-                        corners[i], self.marker_size,
-                        self.camera_matrix, self.dist_coeffs,
-                    )
-                    tvec = tvecs[0].flatten()
-                    dist = float(np.linalg.norm(tvec))
-
-                    color = (0, 255, 0) if mid == self.target_id else (0, 165, 255)
-                    label = f"ID:{mid} D:{dist:.2f}m"
-                    cv2.putText(frame, label,
-                                tuple(mc.astype(int)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
-
-                    if mid == self.target_id:
-                        target_offset = MarkerOffset(
-                            marker_id=int(mid), dx=float(dx), dy=float(dy)
-                        )
-                        in_zone = self.zone.contains(dx, dy)
-
-            # Update shared state
-            with self._lock:
-                self._offset = target_offset
-
-            # Draw zone box and show frame
-            self.zone.draw(frame, in_zone)
-            cv2.imshow("UAV ArUco Follow", frame)
-            cv2.waitKey(1)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Correction logic
-# ──────────────────────────────────────────────────────────────────────────────
-
-def compute_correction(offset: MarkerOffset, zone: CenterZone) -> Tuple[int, int]:
-    """
-    Given a marker offset that is OUTSIDE the zone, return (roll_pwm, pitch_pwm)
-    RC override values to nudge the drone toward the marker.
-
-    Roll  (CH1): marker to the right  (dx > 0) → roll right → PWM > 1500
-                 marker to the left   (dx < 0) → roll left  → PWM < 1500
-    Pitch (CH2): marker below centre  (dy > 0) → pitch back → PWM > 1500
-                 marker above centre  (dy < 0) → pitch fwd  → PWM < 1500
-
-    Only the axis that is outside the zone gets corrected; the other stays at
-    1500 (neutral) so we don't fight ourselves.
-    """
-    roll_pwm  = 1500
-    pitch_pwm = 1500
-
-    half_w = zone.box_w / 2.0
-    half_h = zone.box_h / 2.0
-
-    # Horizontal correction (roll)
-    if abs(offset.dx) > half_w:
-        roll_pwm = 1500 + int(np.sign(offset.dx) * ROLL_NUDGE)
-
-    # Vertical correction (pitch)
-    # Camera dy positive = marker is BELOW centre = drone needs to fly forward
-    if abs(offset.dy) > half_h:
-        pitch_pwm = 1500 + int(np.sign(offset.dy) * PITCH_NUDGE)
-
+    roll_pwm  = int(RC_CENTER + max(-MAX_NUDGE, min(MAX_NUDGE,  KP_ROLL  * ex)))
+    pitch_pwm = int(RC_CENTER + max(-MAX_NUDGE, min(MAX_NUDGE, -KP_PITCH * ey)))
     return roll_pwm, pitch_pwm
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Main mission
-# ──────────────────────────────────────────────────────────────────────────────
+def is_centered(pos: MarkerPosition, deadband: float = METER_DEADBAND) -> bool:
+    return abs(pos.x) <= deadband and abs(pos.y) <= deadband
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DISPLAY HELPER
+# ═════════════════════════════════════════════════════════════════════════════
+
+def show(frame, status: str, vision, target_in_zone: bool):
+    """
+    Overlay a status bar on the annotated frame and push it to the window.
+    Also draws the centre-zone box using UAVVision's CenterZone helper.
+    """
+    if frame is None:
+        return
+
+    out = frame.copy()
+
+    # Draw the centre-zone box (green = in, red = out / not detected)
+    vision.center_zone.draw(out, target_in_zone)
+
+    # Draw crosshair at exact frame centre
+    h, w = out.shape[:2]
+    cv2.drawMarker(out, (w // 2, h // 2), (255, 255, 255),
+                   cv2.MARKER_CROSS, 20, 1, cv2.LINE_AA)
+
+    # Status bar along the top
+    cv2.rectangle(out, (0, 0), (w, 36), (0, 0, 0), -1)
+    cv2.putText(out, status, (8, 26),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+
+    cv2.imshow(WINDOW_NAME, out)
+    cv2.waitKey(1)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MAIN MISSION
+# ═════════════════════════════════════════════════════════════════════════════
 
 def main():
     log("==========================================")
-    log("   UAV ARUCO FOLLOW MISSION")
+    log("   UAV MISSION 5 - VISION GUIDED")
+    log("   Takeoff -> 5m Forward -> Centre ArUco (60s) -> Land")
     log("==========================================")
 
-    # 1. Connect to flight controller
-    log(f"Connecting to flight controller: {CONNECTION_STRING}...")
+    # ── Connect to flight controller ─────────────────────────────────────────
+    log(f"[FC] Connecting: {CONNECTION_STRING}...")
     master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE)
     master.wait_heartbeat()
-    log("Heartbeat OK — drone is alive.")
+    log("[FC] Heartbeat OK.")
 
-    # 2. Start vision in background
-    zone   = CenterZone(ZONE_BOX_WIDTH, ZONE_BOX_HEIGHT)
-    vision = VisionThread(
-        calibration_file = CALIBRATION_FILE,
-        marker_size      = MARKER_SIZE,
-        aruco_dict_id    = ARUCO_DICT,
-        target_id        = TARGET_MARKER_ID,
-        zone             = zone,
-    )
-    vision.start()
+    # ── Init vision (camera settings live entirely in uav_vision.py) ─────────
+    log("[Vision] Starting UAVVision with ZED camera...")
+    try:
+        vision = UAVVision(
+            calibration_file=CALIBRATION_FILE,
+            marker_size=MARKER_SIZE,
+            use_zed=True,           # ZED camera — settings in uav_vision.py
+            zone_box_width=200,
+            zone_box_height=200,
+        )
+    except Exception as e:
+        log(f"[!] Vision init failed: {e}")
+        return
+
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(WINDOW_NAME, 1280, 720)
+
+    loop_dt = 1.0 / FOLLOW_HZ
 
     try:
-        # ── Phase 1: Arm and climb ────────────────────────────────────────────
+        ######################################################################
+        # PHASE 1: ARM + CLIMB
+        ######################################################################
+        log("\n--- PHASE 1: TAKEOFF ---")
         change_mode(master, "STABILIZE")
         arm_drone(master)
 
-        log(f"Climbing to {TARGET_ALT}m...")
         while True:
-            alt = get_lidar_alt(master)
-            print(f"\r  Altitude: {alt:.2f}m", end="", flush=True)
+            alt = get_lidar_alt(master, blocking=True)
+            print(f"\r  Alt: {alt:.2f}m / {TARGET_ALT}m", end="", flush=True)
+
+            positions, annotated, _, _ = vision.process_frame(display=False)
+            show(annotated,
+                 f"TAKEOFF  Alt:{alt:.2f}m  Target:{TARGET_ALT}m",
+                 vision, False)
+
             if alt >= TARGET_ALT:
-                rc_override(master, throttle=THROTTLE_HOVER)
-                log(f"\nHover altitude reached: {alt:.2f}m")
+                set_rc_override(master, throttle=THROTTLE_HOVER)
+                log(f"\n[FC] Hover altitude reached: {alt:.2f}m")
                 break
-            rc_override(master, throttle=THROTTLE_CLIMB)
+
+            set_rc_override(master, throttle=THROTTLE_CLIMB)
             time.sleep(0.1)
 
-        log("Hovering. Scanning for ArUco marker...")
+        ######################################################################
+        # PHASE 2: FLY FORWARD ~5 METRES
+        ######################################################################
+        log(f"\n--- PHASE 2: FORWARD FLIGHT ({FORWARD_FLIGHT_TIME}s) ---")
 
-        # ── Phase 2: Marker follow loop ───────────────────────────────────────
-        last_correction_time = 0.0   # tracks when we last sent a nudge
+        fwd_start = time.time()
+        while (time.time() - fwd_start) < FORWARD_FLIGHT_TIME:
+            elapsed   = time.time() - fwd_start
+            remaining = FORWARD_FLIGHT_TIME - elapsed
+
+            alt = get_lidar_alt(master)
+            set_rc_override(master,
+                            pitch=FORWARD_PITCH_PWM,
+                            throttle=throttle_hold(alt))
+
+            positions, annotated, _, _ = vision.process_frame(display=False)
+            show(annotated,
+                 f"FORWARD  {elapsed:.1f}s / {FORWARD_FLIGHT_TIME}s  "
+                 f"remaining:{remaining:.1f}s  Alt:{alt:.2f}m",
+                 vision, False)
+
+            print(f"\r  Flying {elapsed:.1f}s  Alt:{alt:.2f}m",
+                  end="", flush=True)
+            time.sleep(0.1)
+
+        # Stop forward motion — return pitch to neutral
+        alt = get_lidar_alt(master)
+        set_rc_override(master, throttle=throttle_hold(alt))
+        log("\n[FC] Forward flight complete. Hovering.")
+
+        ######################################################################
+        # PHASE 3: ACQUIRE MARKER + CENTRE FOR 60 SECONDS
+        ######################################################################
+        log(f"\n--- PHASE 3: ACQUIRE + CENTRE ({CENTER_HOLD_TIME}s) ---")
+
+        target_id            = None   # locked marker ID
+        confirm_count        = 0      # consecutive detections before lock
+        center_timer         = None   # when we first achieved lock
+        last_correction_time = 0.0    # cooldown tracker
 
         while True:
-            now = time.time()
+            loop_start = time.time()
 
-            # ── Altitude hold (runs every iteration) ─────────────────────────
             alt = get_lidar_alt(master)
-            if alt < TARGET_ALT - ALT_BAND:
-                throttle_pwm = THROTTLE_HOVER + ALT_BOOST   # sinking → more power
-            elif alt > TARGET_ALT + ALT_BAND:
-                throttle_pwm = THROTTLE_HOVER - ALT_BOOST   # drifting high → less power
-            else:
-                throttle_pwm = THROTTLE_HOVER               # in the band → hold steady
+            thr = throttle_hold(alt)
 
-            # ── Marker correction (rate-limited by cooldown) ──────────────────
-            offset = vision.get_target_offset()
+            # process_frame returns (positions, annotated_frame, corners, ids)
+            positions, annotated, corners, ids = vision.process_frame(display=False)
 
-            if offset is None:
-                # No marker visible — hold position, just keep throttle alive
-                rc_override(master, roll=1500, pitch=1500, throttle=throttle_pwm, yaw=1500)
-                log("Marker not detected — holding position.")
-                time.sleep(0.2)
+            if positions is None:
+                # Frame grab failed — keep throttle alive
+                set_rc_override(master, throttle=thr)
+                time.sleep(0.05)
                 continue
 
-            in_zone = zone.contains(offset.dx, offset.dy)
-
-            if in_zone:
-                # Marker is centred — neutral roll/pitch, maintain altitude
-                rc_override(master, roll=1500, pitch=1500, throttle=throttle_pwm, yaw=1500)
-                log(f"Marker ID {offset.marker_id}: IN ZONE "
-                    f"(dx={offset.dx:.1f}px, dy={offset.dy:.1f}px)")
-
-            else:
-                # Marker is off-centre — but only send a nudge if cooldown has expired
-                if (now - last_correction_time) >= CORRECTION_COOLDOWN:
-                    roll_pwm, pitch_pwm = compute_correction(offset, zone)
-                    rc_override(master,
-                                roll=roll_pwm, pitch=pitch_pwm,
-                                throttle=throttle_pwm, yaw=1500)
-                    log(f"Marker ID {offset.marker_id}: OUTSIDE ZONE "
-                        f"dx={offset.dx:.1f}px dy={offset.dy:.1f}px "
-                        f"→ roll={roll_pwm} pitch={pitch_pwm}")
-                    last_correction_time = now
+            # ── Acquisition mode ──────────────────────────────────────────────
+            if target_id is None:
+                if positions:
+                    confirm_count += 1
+                    candidate = positions[0].marker_id
+                    if confirm_count >= CONFIRM_NEEDED:
+                        target_id    = candidate
+                        center_timer = time.time()
+                        log(f"\n[ArUco] Locked on ID:{target_id}. "
+                            f"Centering for {CENTER_HOLD_TIME}s...")
+                    status = (f"CONFIRMING ID:{candidate}  "
+                              f"{confirm_count}/{CONFIRM_NEEDED}  Alt:{alt:.2f}m")
                 else:
-                    # Cooldown active — keep throttle alive but don't change attitude
-                    rc_override(master, throttle=throttle_pwm)
+                    confirm_count = 0
+                    status = f"SEARCHING for marker...  Alt:{alt:.2f}m"
 
-            time.sleep(0.05)   # 20 Hz flight-control tick
+                set_rc_override(master, throttle=thr)
+                show(annotated, status, vision, False)
 
-    except KeyboardInterrupt:
-        log("\n[!] Ctrl-C detected — initiating emergency landing...")
+            # ── Centring mode ─────────────────────────────────────────────────
+            else:
+                pos = next((p for p in positions
+                            if p.marker_id == target_id), None)
 
-    finally:
-        # ── Phase 3: Land ─────────────────────────────────────────────────────
-        log("Switching to LAND mode...")
+                if pos:
+                    in_zone   = is_centered(pos, METER_DEADBAND)
+                    time_held = time.time() - center_timer
+                    time_left = CENTER_HOLD_TIME - time_held
+
+                    now = time.time()
+                    if not in_zone and (now - last_correction_time) >= CORRECTION_COOLDOWN:
+                        # Marker outside deadband and cooldown expired — nudge
+                        roll_pwm, pitch_pwm = compute_correction(pos)
+                        set_rc_override(master,
+                                        roll=roll_pwm,
+                                        pitch=pitch_pwm,
+                                        throttle=thr)
+                        log(f"[Centre] x:{pos.x:.3f}m y:{pos.y:.3f}m  "
+                            f"roll:{roll_pwm} pitch:{pitch_pwm}  "
+                            f"held:{time_held:.1f}s left:{time_left:.1f}s")
+                        last_correction_time = now
+                    else:
+                        # In zone OR cooldown still active — hold neutral attitude
+                        set_rc_override(master, throttle=thr)
+
+                    status = (f"CENTRING ID:{target_id}  "
+                              f"x:{pos.x:.2f}m y:{pos.y:.2f}m  "
+                              f"held:{time_held:.1f}s  left:{time_left:.1f}s  "
+                              f"Alt:{alt:.2f}m")
+                    show(annotated, status, vision, in_zone)
+
+                    print(f"\r  {status}", end="", flush=True)
+
+                    if time_held >= CENTER_HOLD_TIME:
+                        log(f"\n[ArUco] {CENTER_HOLD_TIME}s centring complete.")
+                        break
+
+                else:
+                    # Target temporarily lost — hold position
+                    set_rc_override(master, throttle=thr)
+                    status = f"MARKER LOST — holding  ID:{target_id}  Alt:{alt:.2f}m"
+                    show(annotated, status, vision, False)
+
+            # Rate limit the loop
+            sleep_t = loop_dt - (time.time() - loop_start)
+            if sleep_t > 0:
+                time.sleep(sleep_t)
+
+        ######################################################################
+        # PHASE 4: FINAL RE-CENTRE BEFORE LAND
+        ######################################################################
+        log(f"\n--- PHASE 4: FINAL CENTRE (deadband={LAND_DEADBAND*100:.1f}cm) ---")
+
+        last_correction_time = 0.0   # reset cooldown for this phase
+
+        while True:
+            loop_start = time.time()
+
+            alt = get_lidar_alt(master)
+            thr = throttle_hold(alt)
+
+            positions, annotated, _, _ = vision.process_frame(display=False)
+
+            if positions is not None:
+                pos = next((p for p in positions
+                            if p.marker_id == target_id), None)
+                if pos:
+                    centered = is_centered(pos, LAND_DEADBAND)
+                    if centered:
+                        set_rc_override(master, throttle=thr)
+                        status = (f"CENTRED  x:{pos.x:.3f}m y:{pos.y:.3f}m  "
+                                  f"→ LANDING")
+                        show(annotated, status, vision, True)
+                        log("[ArUco] Centred within land gate. Initiating land.")
+                        break
+                    else:
+                        now = time.time()
+                        if (now - last_correction_time) >= CORRECTION_COOLDOWN:
+                            roll_pwm, pitch_pwm = compute_correction(pos)
+                            set_rc_override(master,
+                                            roll=roll_pwm,
+                                            pitch=pitch_pwm,
+                                            throttle=thr)
+                            log(f"[LandGate] x:{pos.x:.3f}m y:{pos.y:.3f}m  "
+                                f"need<{LAND_DEADBAND:.3f}m  "
+                                f"roll:{roll_pwm} pitch:{pitch_pwm}")
+                            last_correction_time = now
+                        else:
+                            set_rc_override(master, throttle=thr)
+
+                        status = (f"FINAL CENTRE  x:{pos.x:.3f}m y:{pos.y:.3f}m  "
+                                  f"need<{LAND_DEADBAND*100:.1f}cm  Alt:{alt:.2f}m")
+                        show(annotated, status, vision, False)
+                else:
+                    set_rc_override(master, throttle=thr)
+                    status = f"FINAL CENTRE — target lost  Alt:{alt:.2f}m"
+                    show(annotated, status, vision, False)
+            else:
+                set_rc_override(master, throttle=thr)
+                status = f"FINAL CENTRE — no frame  Alt:{alt:.2f}m"
+                show(None, status, vision, False)
+
+            sleep_t = loop_dt - (time.time() - loop_start)
+            if sleep_t > 0:
+                time.sleep(sleep_t)
+
+        ######################################################################
+        # LAND
+        ######################################################################
+        log("\n[FC] Switching to LAND mode...")
         change_mode(master, "LAND")
-        rc_override(master, throttle=0)   # release override so autopilot lands cleanly
+        set_rc_override(master, roll=RC_CENTER, pitch=RC_CENTER,
+                        throttle=0, yaw=RC_CENTER)   # release override
 
-        log("Waiting for touchdown...")
+        log("[FC] Waiting for touchdown...")
         while True:
             alt = get_lidar_alt(master)
             print(f"\r  Land alt: {alt:.2f}m", end="", flush=True)
+
+            positions, annotated, _, _ = vision.process_frame(display=False)
+            show(annotated, f"LANDING  Alt:{alt:.2f}m", vision, False)
+
             msg = master.recv_match(type="HEARTBEAT", blocking=False)
             if msg and not (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
-                log("\nTouchdown confirmed. Motors stopped.")
+                log("\n[FC] Touchdown confirmed. Motors stopped.")
                 break
             time.sleep(0.5)
 
-        vision.stop()
-        log("Mission complete.")
+    except KeyboardInterrupt:
+        log("\n[!] Emergency land triggered by user.")
+        change_mode(master, "LAND")
+        set_rc_override(master, roll=RC_CENTER, pitch=RC_CENTER,
+                        throttle=0, yaw=RC_CENTER)
+        time.sleep(1)
+
+    finally:
+        vision.close()   # closes ZED camera — same call as standalone uav_vision test
+        log("Mission 5 finalized.")
 
 
 if __name__ == "__main__":
