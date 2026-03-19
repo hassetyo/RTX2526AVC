@@ -44,7 +44,10 @@ ALT_BAND        = 0.1   # ±metres before altitude correction kicks in
 ALT_BOOST       = 100   # PWM added/removed for altitude correction
 
 # --- Camera / ArUco ---
-CAMERA_INDEX       = 0                     # USB camera index
+# ZED resolution choices: HD2K, HD1080, HD720, VGA
+ZED_RESOLUTION     = "HD720"               # lower res = faster ArUco detection
+ZED_FPS            = 60                    # 0 = SDK default for chosen resolution
+ZED_EXPOSURE       = 20                    # 1–100, low value = sharp fast-moving markers
 CALIBRATION_FILE   = "calibration_chessboard.yaml"
 MARKER_SIZE        = 0.1                   # physical marker size in metres
 ARUCO_DICT         = aruco.DICT_6X6_1000   # must match printed markers
@@ -189,11 +192,12 @@ class VisionThread:
     Runs ArUco detection in a background thread so the flight-control loop
     is never blocked waiting for a camera frame.
 
+    Uses the ZED camera (left lens, BGR) via the pyzed SDK.
     After each frame the latest MarkerOffset for TARGET_MARKER_ID (or None
     if not detected) is available via .get_target_offset().
     """
 
-    def __init__(self, camera_index: int, calibration_file: str,
+    def __init__(self, calibration_file: str,
                  marker_size: float, aruco_dict_id: int,
                  target_id: int, zone: CenterZone):
         self.target_id = target_id
@@ -203,14 +207,36 @@ class VisionThread:
         self._running  = False
         self._thread   = None
 
-        # Camera
-        self.cap = cv2.VideoCapture(camera_index, cv2.CAP_AVFOUNDATION)
-        if not self.cap.isOpened():
-            raise RuntimeError("Failed to open camera")
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT,  720)
+        # ── ZED camera setup ──────────────────────────────────────────────────
+        import pyzed.sl as sl
+        self._sl = sl   # keep reference so _loop can use it without re-importing
 
-        # ArUco
+        self.zed = sl.Camera()
+
+        init_params = sl.InitParameters()
+        # Map the string config value to the SDK enum
+        res_map = {
+            "HD2K":   sl.RESOLUTION.HD2K,
+            "HD1080": sl.RESOLUTION.HD1080,
+            "HD720":  sl.RESOLUTION.HD720,
+            "VGA":    sl.RESOLUTION.VGA,
+        }
+        init_params.camera_resolution = res_map.get(ZED_RESOLUTION, sl.RESOLUTION.HD720)
+        init_params.camera_fps        = ZED_FPS
+        init_params.depth_mode        = sl.DEPTH_MODE.NONE  # depth not needed here
+
+        status = self.zed.open(init_params)
+        if status != sl.ERROR_CODE.SUCCESS:
+            raise RuntimeError(f"ZED failed to open: {status}")
+
+        # Low exposure keeps fast-moving markers sharp
+        self.zed.set_camera_settings(sl.VIDEO_SETTINGS.EXPOSURE, ZED_EXPOSURE)
+        log(f"ZED camera opened — {ZED_RESOLUTION} @ {ZED_FPS}fps, exposure={ZED_EXPOSURE}")
+
+        # Reusable ZED image buffer
+        self._zed_image = sl.Mat()
+
+        # ── ArUco setup ───────────────────────────────────────────────────────
         self.aruco_dict = aruco.getPredefinedDictionary(aruco_dict_id)
         fs = cv2.FileStorage(calibration_file, cv2.FILE_STORAGE_READ)
         self.camera_matrix = fs.getNode("K").mat()
@@ -230,7 +256,7 @@ class VisionThread:
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)
-        self.cap.release()
+        self.zed.close()
         cv2.destroyAllWindows()
         log("Vision thread stopped.")
 
@@ -239,11 +265,21 @@ class VisionThread:
         with self._lock:
             return self._offset
 
+    def _grab_frame(self) -> Optional[np.ndarray]:
+        """Grab one BGR frame from the ZED left lens. Returns None on error."""
+        sl = self._sl
+        if self.zed.grab() != sl.ERROR_CODE.SUCCESS:
+            return None
+        self.zed.retrieve_image(self._zed_image, sl.VIEW.LEFT)
+        # ZED returns BGRA — drop the alpha channel
+        bgra = self._zed_image.get_data()
+        return cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
+
     def _loop(self):
         while self._running:
-            ret, frame = self.cap.read()
-            if not ret:
-                time.sleep(0.01)
+            frame = self._grab_frame()
+            if frame is None:
+                time.sleep(0.005)
                 continue
 
             frame_h, frame_w = frame.shape[:2]
@@ -348,7 +384,6 @@ def main():
     # 2. Start vision in background
     zone   = CenterZone(ZONE_BOX_WIDTH, ZONE_BOX_HEIGHT)
     vision = VisionThread(
-        camera_index     = CAMERA_INDEX,
         calibration_file = CALIBRATION_FILE,
         marker_size      = MARKER_SIZE,
         aruco_dict_id    = ARUCO_DICT,
