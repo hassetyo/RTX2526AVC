@@ -184,6 +184,8 @@ def main(): # the main boss function
             #alt = get_lidar_alt(master) # check lidar
             alt = 0.0 # placeholder until we test the lidar in this script
             print(f" Altitude: {alt:.2f}m", end='\r') # log height
+            #temporarily break the loop to test the forward flight pattern without lidar input
+            break
             if alt >= TARGET_ALT: # if we hit the hover point
                 set_throttle(master, THROTTLE_HOVER) # pull back to hover power
                 print(f"\nHover altitude reached: {alt:.2f}m") # declare success
@@ -197,8 +199,8 @@ def main(): # the main boss function
         #Step 4: land and shutdown
         print("\nLanding sequence engaged...") # start descent
         change_mode(master, "LAND") # switch to official land mode for graceful touchdown
-        #(Uncomment)
-        #set_throttle(master, 0) # release throttle override so autopilot takes over
+        
+        set_throttle(master, 0) # release throttle override so autopilot takes over
 
         while True: # loop until we hit the floor
             #(Uncomment)
