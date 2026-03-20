@@ -197,7 +197,8 @@ def main(): # the main boss function
         #Step 4: land and shutdown
         print("\nLanding sequence engaged...") # start descent
         change_mode(master, "LAND") # switch to official land mode for graceful touchdown
-        set_throttle(master, 0) # release throttle override so autopilot takes over
+        #(Uncomment)
+        #set_throttle(master, 0) # release throttle override so autopilot takes over
 
         while True: # loop until we hit the floor
             #(Uncomment)
