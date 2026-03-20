@@ -154,15 +154,15 @@ def snake_search_pattern(master):
 #################### the main Challenge 2 logic
 
 def main(): # the main boss function
-    log_event("=========================================") # header
-    log_event("        UAV CHALLENGE 2: Searching") # title
-    log_event("=========================================") # footer
+    print("=========================================") # header
+    print("        UAV CHALLENGE 2: Searching") # title
+    print("=========================================") # footer
     
     # step 1: connect to the wires
-    log_event(f"Connecting to Drone: {CONNECTION_STRING}...") # login
+    print(f"Connecting to Drone: {CONNECTION_STRING}...") # login
     master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE) # open link
     master.wait_heartbeat() # wait for buzz
-    log_event("Drone Heartbeat OK.") # success
+    print("Drone Heartbeat OK.") # success
 
     ''' # we dont need to connect to the ugv  for now (Uncomment)
     bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="UAV-Bridge") # radio bridge
@@ -178,13 +178,15 @@ def main(): # the main boss function
         change_mode(master, "STABILIZE") # switch to stabilize for manual throttle control
         arm_drone(master) # start the props
         
-        log_event("Climbing to 1.3m...") # log the climb
+        print("Climbing to 1.3m...") # log the climb
         while True: # loop until target height
-            alt = get_lidar_alt(master) # check lidar
-            log_event(f" Altitude: {alt:.2f}m", end='\r') # log height
+            #(Uncomment)
+            #alt = get_lidar_alt(master) # check lidar
+            alt = 0.0 # placeholder until we test the lidar in this script
+            print(f" Altitude: {alt:.2f}m", end='\r') # log height
             if alt >= TARGET_ALT: # if we hit the hover point
                 set_throttle(master, THROTTLE_HOVER) # pull back to hover power
-                log_event(f"\nHover altitude reached: {alt:.2f}m") # declare success
+                print(f"\nHover altitude reached: {alt:.2f}m") # declare success
                 break # break the climb
             set_throttle(master, THROTTLE_CLIMB) # keep pushing up
             time.sleep(0.1) # quick loop
@@ -193,31 +195,33 @@ def main(): # the main boss function
         snake_search_pattern(master)
 
         #Step 4: land and shutdown
-        log_event("\nLanding sequence engaged...") # start descent
+        print("\nLanding sequence engaged...") # start descent
         change_mode(master, "LAND") # switch to official land mode for graceful touchdown
         set_throttle(master, 0) # release throttle override so autopilot takes over
 
         while True: # loop until we hit the floor
-            alt = get_lidar_alt(master) # check lidar
-            log_event(f" Land Alt: {alt:.2f}m", end='\r') # log altitude
+            #(Uncomment)
+            #alt = get_lidar_alt(master) # check lidar
+            alt = 0.0 # placeholder until we test the lidar in this script
+            print(f" Land Alt: {alt:.2f}m", end='\r') # log altitude
             
             # checking if the drone disarmed itself (autopilot does this after landing)
             msg = master.recv_match(type='HEARTBEAT', blocking=False)
             if msg and not (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
-                log_event("\nTouchdown confirmed. Motors stopped.") # log success
+                print("\nTouchdown confirmed. Motors stopped.") # log success
                 break # exit
             time.sleep(0.5) # slower loop for checking
     
 
     except KeyboardInterrupt: # someone hit ctrl+c
-        log_event("\n[!] Emergency: User Triggered Landing...") # abort log
+        print("\n[!] Emergency: User Triggered Landing...") # abort log
         change_mode(master, "LAND") # force land mode immediately
         set_throttle(master, 0) # release override
         time.sleep(1) # wait for command to hit
     finally: # final chores
         #(Uncomment)
         #bridge.stop() # close radio wire 
-        log_event("Mission finalized.") # end log
+        print("Mission finalized.") # end log
 
 if __name__ == "__main__": # entry point
     main() # run it
