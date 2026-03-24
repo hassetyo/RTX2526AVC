@@ -120,10 +120,11 @@ def throttle_hold(alt: float) -> int:
     return THROTTLE_HOVER
 
 def get_lidar_alt(master): # checks the floor distance via lidar
-    msg = master.recv_match(type='DISTANCE_SENSOR', blocking=True, timeout=1.0) # wait for lidar packet
-    if msg: # if we got a real message
-        return msg.current_distance / 100.0 # return height in meters
-    return 0.0 # return zero if lidar is dead
+    #(Uncomment)
+    #msg = master.recv_match(type='DISTANCE_SENSOR', blocking=True, timeout=1.0) # wait for lidar packet
+    #if msg: # if we got a real message
+    #    return msg.current_distance / 100.0 # return height in meters
+    return 1.3 # return zero if lidar is dead
 
 #Logging events in a text doc
 def log_event(text): # helper to write required logs
@@ -132,24 +133,53 @@ def log_event(text): # helper to write required logs
     print(line.strip())
     with open(LOG_FILE, "a") as f: f.write(line)
 
+def yaw_right_90(master):
+    print("Turning 90 degrees right...")
+    # This is a 'timed' turn since we aren't reading compass/IMU yet
+    # Adjust TURN_TIME based on your drone's sensitivity
+    TURN_TIME = 1.5 
+    start = time.time()
+    while (time.time() - start) < TURN_TIME:
+        # CH4 is Yaw. 1500 is neutral, 1600 is right rotation
+        set_rc_override(master, yaw=1600, throttle=THROTTLE_HOVER)
+        time.sleep(0.1)
+    set_rc_override(master, yaw=RC_CENTER, throttle=THROTTLE_HOVER)
+
+#moves the drone forward for a set duration
+def move_forward_timed(master, seconds, pitch_pwm=1580, debug_log=True):
+    #- pitch_pwm: 1580 is a gentle forward tilt.
+
+    print(f"\n>>> COMMAND: Moving FORWARD for {seconds}s")
+    start_time = time.time()
+    
+    while (time.time() - start_time) < seconds:
+    
+        current_alt = get_lidar_alt(master) #Get current altitude
+        
+        
+        thr = throttle_hold(current_alt) #calculate throttle based on altitude error
+        
+        # 3. Send RC Override to move forward while maintaining altitude
+        set_rc_override(master, pitch=pitch_pwm, throttle=thr, roll=RC_CENTER, yaw=RC_CENTER)
+        
+        if debug_log:
+            elapsed = time.time() - start_time
+            print(f" [FLYING] Time: {elapsed:.1f}/{seconds}s | Pitch: {pitch_pwm} | Alt: {current_alt}m", end='\r')
+            
+        time.sleep(0.1) # 10Hz update rate is standard for MAVLink overrides
+
+    # 4. BRAKE / NEUTRALIZE
+    # After the time is up, we must center the pitch or the drone will keep drifting
+    print(f"\n>>> Forward move complete. Neutralizing pitch.")
+    set_rc_override(master, pitch=RC_CENTER, throttle=THROTTLE_HOVER)
+
 #Searching algorithm: snake pattern
 #Temporarily goes forward to test if thats even possible
-def snake_search_pattern(master):
-    log(f"\n--- PHASE 2: FORWARD FLIGHT ({FORWARD_FLIGHT_TIME}s) ---")
+def snake_search_pattern(master, passes=3):
     fwd_start = time.time()
-    while (time.time() - fwd_start) < FORWARD_FLIGHT_TIME:
-        elapsed   = time.time() - fwd_start
-        remaining = FORWARD_FLIGHT_TIME - elapsed
-
-        alt = get_lidar_alt(master)
-        set_rc_override(master, pitch=FORWARD_PITCH_PWM, throttle=throttle_hold(alt))
-
-        print(f"\r  Flying {elapsed:.1f}s  Alt:{alt:.2f}m",
-        end="", flush=True)
-        time.sleep(0.1)
-
-    set_rc_override(master, throttle=throttle_hold(alt))
-    print("Flying forward complete. Hovering...")
+    print("Moving forward for 20 seconds to test forward flight pattern...")
+    move_forward_timed(master, seconds=20, pitch_pwm=FORWARD_PITCH_PWM)
+    print("Forward flight test complete.")
 
 #################### the main Challenge 2 logic
 
