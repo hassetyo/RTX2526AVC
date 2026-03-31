@@ -1,0 +1,409 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/robots/dji/mavic/protos/Mavic2Pro.proto"
+
+WorldInfo {
+  title "Operation Touchdown - GPS Denied Football Field"
+  basicTimeStep 8
+  defaultDamping Damping {
+    linear 0.5
+    angular 0.5
+  }
+}
+Viewpoint {
+  orientation -0.1648016316447624 0.16378466234846462 0.9726330277070708 1.6146559251147705
+  position 3.377221178734156 -14.704973859901553 6.449363743857045
+  follow "Mavic 2 PRO"
+  followSmoothness 0.2
+}
+TexturedBackground {
+  texture "noon_sunny_empty"
+}
+TexturedBackgroundLight {
+}
+Solid {
+  translation 0 0 -0.01
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.2 0.55 0.15
+        roughness 1
+        metalness 0
+      }
+      geometry Box {
+        size 100 55 0.02
+      }
+    }
+  ]
+  name "field_ground"
+  boundingObject Box {
+    size 100 55 0.02
+  }
+  locked TRUE
+}
+Solid {
+  translation 0 27 0.001
+  children [
+    Shape {
+      appearance PBRAppearance {
+        roughness 1
+        metalness 0
+      }
+      geometry Box {
+        size 91.44 0.15 0.005
+      }
+    }
+  ]
+  name "sideline_north"
+}
+Solid {
+  translation 0 -27 0.001
+  children [
+    Shape {
+      appearance PBRAppearance {
+        roughness 1
+        metalness 0
+      }
+      geometry Box {
+        size 91.44 0.15 0.005
+      }
+    }
+  ]
+  name "sideline_south"
+}
+Solid {
+  translation 45.72 0 0.001
+  children [
+    Shape {
+      appearance PBRAppearance {
+        roughness 1
+        metalness 0
+      }
+      geometry Box {
+        size 0.15 54 0.005
+      }
+    }
+  ]
+  name "endline_east"
+}
+Solid {
+  translation -45.72 0 0.001
+  children [
+    Shape {
+      appearance PBRAppearance {
+        roughness 1
+        metalness 0
+      }
+      geometry Box {
+        size 0.15 54 0.005
+      }
+    }
+  ]
+  name "endline_west"
+}
+Solid {
+  translation 0 0 0.001
+  children [
+    Shape {
+      appearance PBRAppearance {
+        roughness 1
+        metalness 0
+      }
+      geometry Box {
+        size 0.1 54 0.005
+      }
+    }
+  ]
+  name "midfield_line"
+}
+Mavic2Pro {
+  hidden linearVelocity_0 4.559174450025515e-06 9.334983280728929e-08 -1.9382221799718124e-05
+  hidden angularVelocity_0 -4.036618473860138e-06 0.00019778391237883545 -2.2958972496139066e-07
+  hidden translation_9 0.0412774 -0.00469654 -0.00405862
+  hidden rotation_9 0 0 1 0
+  hidden linearVelocity_9 1.2568042807587265e-05 1.855370900440954e-07 -5.55114343375748e-05
+  hidden angularVelocity_9 -4.079518759344528e-06 0.00019763293685501874 -2.582638213108194e-07
+  hidden translation_10 0.000625212 -0.00530346 -0.0207448
+  hidden rotation_10 0 1 0 0.15991473789453628
+  hidden linearVelocity_10 0.01854636346059556 1.4443392040698767e-07 0.02444578960264664
+  hidden angularVelocity_10 -6.84377942300558e-06 9.944899190961774 1.076647048770459e-05
+  hidden translation_11 0.00754686 0.0160388 -0.00586401
+  hidden rotation_11 1 0 0 0
+  hidden linearVelocity_11 -0.06791773570616018 9.34361379016529e-08 0.01657600863790147
+  hidden angularVelocity_11 -6.84949327149573e-06 9.944899115577487 1.0766528937385156e-05
+  translation -0.005307862545221656 5.073335059571655e-07 0.06570774489015803
+  rotation 1.561510778888609e-05 -0.9999999998727086 3.27893401857298e-06 0.06973633046670934
+  controller "uav_controller"
+  supervisor TRUE
+  bodySlot [
+    Camera {
+      translation 0 0 -0.03
+      rotation 0 1 0 1.5708
+      name "downward_camera"
+      fieldOfView 1.2
+      width 640
+      height 480
+      near 0.05
+    }
+    DistanceSensor {
+      translation 0 0 -0.03
+      rotation 0 1 0 1.5708
+      name "lidar_alt"
+      lookupTable [
+        0 0 0
+        40 40000 0
+      ]
+      type "laser"
+      aperture 0.01
+    }
+    Emitter {
+      name "v2v_emitter"
+      range 100
+      channel 1
+    }
+    Receiver {
+      name "v2v_receiver"
+      channel 2
+    }
+  ]
+}
+Robot {
+  translation 1.83006 5.15673e-09 0.0897106
+  rotation -0.9999999629673408 -1.2650160968397187e-11 0.00027214943875726176 5.608921026878121e-08
+  children [
+    Solid {
+      children [
+        Shape {
+          appearance PBRAppearance {
+            baseColor 0.3 0.3 0.3
+            roughness 0.6
+            metalness 0.4
+          }
+          geometry Box {
+            size 0.6 0.6 0.1
+          }
+        }
+      ]
+      name "chassis"
+    }
+    Solid {
+      translation 0 0 0.052
+      children [
+        Shape {
+          appearance PBRAppearance {
+            baseColorMap ImageTexture {
+              url [
+                "../textures/aruco_marker_id2.png"
+              ]
+            }
+            roughness 1
+            metalness 0
+          }
+          geometry Box {
+            size 0.4 0.4 0.003
+          }
+        }
+      ]
+      name "aruco_marker_top"
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters {
+        position -4.5579941876851425e-06
+        axis 0 1 0
+        anchor -0.18 0.2 -0.03
+      }
+      device [
+        RotationalMotor {
+          name "wheel_fl"
+          maxVelocity 20
+        }
+      ]
+      endPoint Solid {
+        translation -0.18 0.2 -0.03
+        rotation 0.9999999999948065 -2.2789447440059004e-06 2.278953115052732e-06 1.570800000005187
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 0.1 0.1 0.1
+              roughness 0.9
+              metalness 0
+            }
+            geometry Cylinder {
+              height 0.05
+              radius 0.06
+            }
+          }
+        ]
+        name "wheel_fl_solid"
+        boundingObject Cylinder {
+          height 0.05
+          radius 0.06
+        }
+        physics Physics {
+          density -1
+          mass 0.2
+        }
+      }
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters {
+        position -4.55771648182031e-06
+        axis 0 1 0
+        anchor -0.18 -0.2 -0.03
+      }
+      device [
+        RotationalMotor {
+          name "wheel_fr"
+          maxVelocity 20
+        }
+      ]
+      endPoint Solid {
+        translation -0.18 -0.2 -0.03
+        rotation 0.9999999999948072 -2.278805891407204e-06 2.278814261943998e-06 1.570800000005187
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 0.1 0.1 0.1
+              roughness 0.9
+              metalness 0
+            }
+            geometry Cylinder {
+              height 0.05
+              radius 0.06
+            }
+          }
+        ]
+        name "wheel_fr_solid"
+        boundingObject Cylinder {
+          height 0.05
+          radius 0.06
+        }
+        physics Physics {
+          density -1
+          mass 0.2
+        }
+      }
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters {
+        position -3.169892461864194e-06
+        axis 0 1 0
+        anchor 0.18 0.2 -0.03
+      }
+      device [
+        RotationalMotor {
+          name "wheel_rl"
+          maxVelocity 20
+        }
+      ]
+      endPoint Solid {
+        translation 0.18 0.2 -0.03
+        rotation 0.9999999999974879 -1.5849843868631481e-06 1.584990208846565e-06 1.5708000000024984
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 0.1 0.1 0.1
+              roughness 0.9
+              metalness 0
+            }
+            geometry Cylinder {
+              height 0.05
+              radius 0.06
+            }
+          }
+        ]
+        name "wheel_rl_solid"
+        boundingObject Cylinder {
+          height 0.05
+          radius 0.06
+        }
+        physics Physics {
+          density -1
+          mass 0.2
+        }
+      }
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters {
+        position -3.169597183401975e-06
+        axis 0 1 0
+        anchor 0.18 -0.2 -0.03
+      }
+      device [
+        RotationalMotor {
+          name "wheel_rr"
+          maxVelocity 20
+        }
+      ]
+      endPoint Solid {
+        translation 0.18 -0.2 -0.03
+        rotation 0.9999999999974883 -1.5848367484109448e-06 1.5848425698520575e-06 1.5708000000025044
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 0.1 0.1 0.1
+              roughness 0.9
+              metalness 0
+            }
+            geometry Cylinder {
+              height 0.05
+              radius 0.06
+            }
+          }
+        ]
+        name "wheel_rr_solid"
+        boundingObject Cylinder {
+          height 0.05
+          radius 0.06
+        }
+        physics Physics {
+          density -1
+          mass 0.2
+        }
+      }
+    }
+    Emitter {
+      name "v2v_emitter"
+      range 100
+      channel 2
+    }
+    Receiver {
+      name "v2v_receiver"
+      channel 1
+    }
+  ]
+  name "skid_steer_ugv"
+  boundingObject Box {
+    size 0.5 0.4 0.12
+  }
+  physics Physics {
+    density -1
+    mass 5
+    centerOfMass [
+      0 0 0
+    ]
+  }
+  controller "ugv_controller"
+}
+Solid {
+  translation 4.1 0 0.005
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColorMap ImageTexture {
+          url [
+            "../textures/aruco_marker_id0.png"
+          ]
+        }
+        roughness 1
+        metalness 0
+      }
+      geometry Box {
+        size 0.7 0.7 0.005
+      }
+    }
+  ]
+  name "destination_marker"
+}
