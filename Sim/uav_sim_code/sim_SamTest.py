@@ -65,6 +65,7 @@ class WebotsDroneLink:
     def arm(self):
         self.send_cmd("arm", value=True) #Send a command to arm the drone
         time.sleep(1) #Wait for a moment to ensure the command is processed
+        
 
     '''Landing algorithm: slowly decrease altitude until we are close to the ground, or the ugv head, then disarm'''
     def land(self, landOnUGV=False):
