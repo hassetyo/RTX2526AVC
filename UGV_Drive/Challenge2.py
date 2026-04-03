@@ -49,6 +49,17 @@ LIDAR_NO_TARGET_M    = 9999.0
 # LED flash timing 
 LED_FLASH_INTERVAL_S = 0.3
 
+def build_attitude_msg(vehicle, throttle_fraction, yaw_rate_deg_s=0.0):
+    return vehicle.message_factory.set_attitude_target_encode(
+        0, 0, 0,
+        0xA3,
+        [1.0, 0.0, 0.0, 0.0],
+        0.0,
+        0.0,
+        math.radians(yaw_rate_deg_s),
+        throttle_fraction,
+    )
+
 def turn_left(vehicle, angle_deg, yaw_rate_deg_s,  flashing=False):
     duration_s      = abs(angle_deg) / yaw_rate_deg_s
     turn_msg        = build_attitude_msg(
