@@ -49,7 +49,7 @@ LIDAR_NO_TARGET_M    = 9999.0
 # LED flash timing 
 LED_FLASH_INTERVAL_S = 0.3
 
-def turn_left(vehicle, angle_deg, yaw_rate_deg_s, green, red, flashing=False):
+def turn_left(vehicle, angle_deg, yaw_rate_deg_s,  flashing=False):
     duration_s      = abs(angle_deg) / yaw_rate_deg_s
     turn_msg        = build_attitude_msg(
         vehicle, throttle_fraction=0.0,
@@ -72,7 +72,7 @@ def turn_left(vehicle, angle_deg, yaw_rate_deg_s, green, red, flashing=False):
 
     send_stop(vehicle)
 
-def turn_right(vehicle, angle_deg, yaw_rate_deg_s, green, red, flashing=False):
+def turn_right(vehicle, angle_deg, yaw_rate_deg_s, flashing=False):
     duration_s      = abs(angle_deg) / yaw_rate_deg_s
     turn_msg        = build_attitude_msg(
         vehicle, throttle_fraction=0.0,
@@ -257,7 +257,7 @@ def main():
         print("UGV armed in GUIDED mode. Starting move...")
         drive_distance(vehicle, 7*FT_TO_M, SPEED_MPS)
         turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
-               green, red, flashing=True)
+                flashing=True)
         drive_distance(vehicle, 9*FT_TO_M, SPEED_MPS)
         print("Move complete. Disarming...")
         vehicle.armed = False
