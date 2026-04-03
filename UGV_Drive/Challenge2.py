@@ -12,7 +12,7 @@ SPEED_MPH = 0.8
 INITIAL_DISTANCE_FT = 7
 SECOND_DISTANCE_FT = 9.0
 TURN_ANGLE_DEG = 35.0
-TURN_RATE_DEG_S = 45.0
+TURN_RATE_DEG_S = 15.0
 
 # Unit conversions
 FT_TO_M = 0.3048
@@ -263,9 +263,9 @@ def main():
 
         print("UGV armed in GUIDED mode. Starting move...")
         drive_distance(vehicle, INITIAL_DISTANCE_M, SPEED_MPS)
-        time.sleep(5.0)
+        time.sleep(1.0)
         turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S, flashing=False)
-        time.sleep(5.0)
+        time.sleep(1.0)
         drive_distance(vehicle, SECOND_DISTANCE_M, SPEED_MPS)
 
         print("Move complete. Disarming...")
