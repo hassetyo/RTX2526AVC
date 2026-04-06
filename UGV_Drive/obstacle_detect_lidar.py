@@ -24,10 +24,10 @@ RED_LED_PIN   = 19
 
 # Mission Parameters
 INITIAL_DISTANCE_FT   = 10.0    # y coordinate
-AVOIDANCE_DISTANCE_FT = 3.0     # how far to drive during each leg of the avoidance path
+AVOIDANCE_DISTANCE_FT = 2.0     # how far to drive during each leg of the avoidance path
 OBSTACLE_THRESHOLD_FT = 1.5     # if lidar detects an obstacle closer than this, trigger avoidance
 SPEED_MPH             = 0.8
-TURN_ANGLE_DEG        = 140.0
+TURN_ANGLE_DEG        = 130.0
 TURN_RATE_DEG_S       = 45.0
 
 FT_TO_M    = 0.3048
@@ -328,25 +328,25 @@ def avoid_obstacle(vehicle, lidar_ser, green, red):
     green.off()
     red.on()
 
-    turn_right(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
+    turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
                green, red, flashing=True)
     drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M, SPEED_MPS,
                   green, red, obstacle_threshold_m=None,
                   flashing=True, label="AVOID RIGHT")
 
-    turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
+    turn_right(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
               green, red, flashing=True)
     drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M, SPEED_MPS,
                   green, red, obstacle_threshold_m=None,
                   flashing=True, label="BYPASS FORWARD")
 
-    turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
+    turn_right(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
               green, red, flashing=True)
     drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M, SPEED_MPS,
                   green, red, obstacle_threshold_m=None,
                   flashing=True, label="RETURN LEFT")
 
-    turn_right(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
+    turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
                green, red, flashing=True)
     drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M, SPEED_MPS,
                   green, red, obstacle_threshold_m=None,
