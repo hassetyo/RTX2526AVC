@@ -331,7 +331,7 @@ def avoid_obstacle(vehicle, lidar_ser, green, red):
     turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
                green, red, flashing=True)
     time.sleep(4.0)
-    
+
     drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M, SPEED_MPS,
                   green, red, obstacle_threshold_m=None,
                   flashing=True, label="AVOID RIGHT")
@@ -341,7 +341,7 @@ def avoid_obstacle(vehicle, lidar_ser, green, red):
               green, red, flashing=True)
     time.sleep(4.0)
 
-    drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M, SPEED_MPS,
+    drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M + 2, SPEED_MPS,
                   green, red, obstacle_threshold_m=None,
                   flashing=True, label="BYPASS FORWARD")
     time.sleep(4.0)
