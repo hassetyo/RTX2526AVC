@@ -27,7 +27,7 @@ INITIAL_DISTANCE_FT   = 10.0
 AVOIDANCE_DISTANCE_FT = 3.0
 OBSTACLE_THRESHOLD_FT = 1.5
 SPEED_MPH             = 0.8
-TURN_ANGLE_DEG        = 90.0
+TURN_ANGLE_DEG        = 130.0
 TURN_RATE_DEG_S       = 45.0
 
 FT_TO_M    = 0.3048
@@ -97,10 +97,10 @@ def read_lidar_m(ser):
     Flushing before each read means we always act on fresh data
     rather than a frame that was sitting in the OS buffer.
     """
-    # Drop everything queued so far â€” we want the latest measurement
+    # Drop everything queued so far Ã¢â‚¬â€ we want the latest measurement
     ser.reset_input_buffer()
 
-    # Now wait for one fresh frame (sensor outputs at 100 Hz so â‰¤10 ms)
+    # Now wait for one fresh frame (sensor outputs at 100 Hz so Ã¢â€°Â¤10 ms)
     # Scan up to 18 bytes (2 full frames worth) looking for the header pair
     for _ in range(18):
         b1 = ser.read(1)
@@ -115,7 +115,7 @@ def read_lidar_m(ser):
         if b2[0] != FRAME_HEADER:
             continue
 
-        # Header found â€” read remaining 7 bytes
+        # Header found Ã¢â‚¬â€ read remaining 7 bytes
         payload = ser.read(7)
         if len(payload) < 7:
             return LIDAR_NO_TARGET_M
@@ -125,7 +125,7 @@ def read_lidar_m(ser):
         raw = [FRAME_HEADER, FRAME_HEADER,
                dist_l, dist_h, peak_l, peak_h, temp, confidence]
         if (sum(raw) & 0xFF) != checksum:
-            # Checksum fail â€” try again from next byte
+            # Checksum fail Ã¢â‚¬â€ try again from next byte
             continue
 
         distance_cm = (dist_h << 8) | dist_l
@@ -224,7 +224,7 @@ def drive_forward(vehicle, lidar_ser, distance_m, speed_mps,
     last_print      = 0.0
     last_flash_time = time.time()
 
-    # Running minimum filter â€” keeps the lowest recent reading
+    # Running minimum filter Ã¢â‚¬â€ keeps the lowest recent reading
     # so a single noisy frame doesn't mask a real obstacle
     FILTER_WINDOW   = 3
     recent_readings = []
@@ -360,7 +360,7 @@ def main():
     green, red = open_leds()
     lidar_ser  = open_lidar()
 
-    # Warm up the lidar â€” let the buffer fill with fresh frames
+    # Warm up the lidar Ã¢â‚¬â€ let the buffer fill with fresh frames
     print("Warming up lidar (1 s)...")
     time.sleep(1.0)
     sample = read_lidar_m(lidar_ser)
@@ -382,6 +382,11 @@ def main():
         
         turn_right(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
                green, red, flashing=True)
+               
+        time.sleep(5)
+               
+        turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
+               green, red, flashing=True)
 
         
 
@@ -399,3 +404,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
