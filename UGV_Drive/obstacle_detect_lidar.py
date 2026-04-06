@@ -23,9 +23,9 @@ GREEN_LED_PIN = 16
 RED_LED_PIN   = 19
 
 # Mission Parameters
-INITIAL_DISTANCE_FT   = 10.0
-AVOIDANCE_DISTANCE_FT = 3.0
-OBSTACLE_THRESHOLD_FT = 1.5
+INITIAL_DISTANCE_FT   = 10.0    # y coordinate
+AVOIDANCE_DISTANCE_FT = 3.0     # how far to drive during each leg of the avoidance path
+OBSTACLE_THRESHOLD_FT = 1.5     # if lidar detects an obstacle closer than this, trigger avoidance
 SPEED_MPH             = 0.8
 TURN_ANGLE_DEG        = 140.0
 TURN_RATE_DEG_S       = 45.0
