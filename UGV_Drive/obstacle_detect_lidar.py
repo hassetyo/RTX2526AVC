@@ -330,27 +330,39 @@ def avoid_obstacle(vehicle, lidar_ser, green, red):
 
     turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
                green, red, flashing=True)
+    time.sleep(4.0)
+    
     drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M, SPEED_MPS,
                   green, red, obstacle_threshold_m=None,
                   flashing=True, label="AVOID RIGHT")
+    time.sleep(4.0)
 
     turn_right(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
               green, red, flashing=True)
+    time.sleep(4.0)
+
     drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M, SPEED_MPS,
                   green, red, obstacle_threshold_m=None,
                   flashing=True, label="BYPASS FORWARD")
+    time.sleep(4.0)
 
     turn_right(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
               green, red, flashing=True)
+    time.sleep(4.0)
+
     drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M, SPEED_MPS,
                   green, red, obstacle_threshold_m=None,
                   flashing=True, label="RETURN LEFT")
+    time.sleep(4.0)
 
     turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
                green, red, flashing=True)
+    time.sleep(4.0)
+
     drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M, SPEED_MPS,
                   green, red, obstacle_threshold_m=None,
                   flashing=True, label="REALIGN FORWARD")
+    time.sleep(4.0)
 
 
 #  Entry point
