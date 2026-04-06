@@ -162,9 +162,9 @@ def drive_distance(vehicle, distance_m, speed_mps):
 
 
 def main():
-    print("==========================================")
-    print("   UGV DIRECT DRIVE TEST")
-    print("==========================================")
+    print("=============================================")
+    print("UGV Challenge 1: Drive Forward a Set Distance")
+    print("=============================================")
     print(f"Connecting to UGV at {UGV_CONTROL_PORT}...")
     print(f"Target distance: {DISTANCE_FT:.1f} ft ({DISTANCE_M:.3f} m)")
     print(f"Target speed:    {SPEED_MPH:.1f} mph ({SPEED_MPS:.4f} m/s)")

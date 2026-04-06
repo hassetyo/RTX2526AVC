@@ -9,8 +9,8 @@ UGV_BAUD_RATE = 115200
 
 # Mission parameters
 SPEED_MPH = 0.8
-INITIAL_DISTANCE_FT = 7
-SECOND_DISTANCE_FT = 9.0
+INITIAL_DISTANCE_FT = 7     # x coordinate
+SECOND_DISTANCE_FT = 9.0    # y coordinate
 TURN_ANGLE_DEG = 35.0
 TURN_RATE_DEG_S = 15.0
 
@@ -250,7 +250,7 @@ def drive_distance(vehicle, distance_m, speed_mps):
 
 def main():
     print("==========================================")
-    print("   UGV DIRECT DRIVE TEST")
+    print("UGV Challenge 2: Move to (x,y)")
     print("==========================================")
     print(f"Connecting to UGV at {UGV_CONTROL_PORT}...")
     print(f"Target speed: {SPEED_MPH:.1f} mph ({SPEED_MPS:.4f} m/s)")
