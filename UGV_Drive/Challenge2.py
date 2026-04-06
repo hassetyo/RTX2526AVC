@@ -9,8 +9,8 @@ UGV_BAUD_RATE = 115200
 
 # Mission parameters
 SPEED_MPH = 0.8
-INITIAL_DISTANCE_FT = 7     # x coordinate
-SECOND_DISTANCE_FT = 9.0    # y coordinate
+INITIAL_DISTANCE_FT = 10.0     # y coordinate
+SECOND_DISTANCE_FT = 5.0    # x coordinate
 TURN_ANGLE_DEG = 15.0
 TURN_RATE_DEG_S = 45.0
 
