@@ -23,7 +23,8 @@ GREEN_LED_PIN = 16
 RED_LED_PIN   = 19
 
 # Mission Parameters
-INITIAL_DISTANCE_FT   = 10.0    # y coordinate
+INITIAL_DISTANCE_FT   = 8.0    # y coordinate
+SECOND_DISTANCE_FT = 8.0        # x coordinate
 AVOIDANCE_DISTANCE_FT = 2.0     # how far to drive during each leg of the avoidance path
 OBSTACLE_THRESHOLD_FT = 1.5     # if lidar detects an obstacle closer than this, trigger avoidance
 SPEED_MPH             = 0.8
@@ -34,6 +35,7 @@ FT_TO_M    = 0.3048
 MPH_TO_MPS = 0.44704
 
 INITIAL_DISTANCE_M   = INITIAL_DISTANCE_FT   * FT_TO_M
+SECOND_DISTANCE_M = SECOND_DISTANCE_FT * FT_TO_M
 AVOIDANCE_DISTANCE_M = AVOIDANCE_DISTANCE_FT * FT_TO_M
 OBSTACLE_THRESHOLD_M = OBSTACLE_THRESHOLD_FT * FT_TO_M
 SPEED_MPS            = SPEED_MPH * MPH_TO_MPS
@@ -367,9 +369,9 @@ def avoid_obstacle(vehicle, lidar_ser, green, red):
 
 #  Entry point
 def main():
-    print("==========================================")
-    print("   UGV OBSTACLE DETECT TEST  (TF-Nova)")
-    print("==========================================")
+    print("=================================================")
+    print("UGV Challenge 3: Obstacle Detection and Avoidance")
+    print("=================================================")
     print(f"UGV port        : {UGV_CONTROL_PORT}")
     print(f"Lidar port      : {LIDAR_PORT}")
     print(f"Green LED GPIO  : {GREEN_LED_PIN}")
@@ -407,6 +409,25 @@ def main():
             obstacle_threshold_m=OBSTACLE_THRESHOLD_M,
             flashing=False,
             label="INITIAL DRIVE",
+        )
+        if obstacle_hit:
+            led_obstacle(green, red)
+            time.sleep(0.5)
+            avoid_obstacle(vehicle, lidar_ser, green, red)
+            led_clear(green, red)
+            print("Obstacle cleared: green LED on.")
+
+        turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
+               green, red, flashing=True)
+        time.sleep(4.0)
+
+        obstacle_hit = drive_forward(
+            vehicle, lidar_ser,
+            SECOND_DISTANCE_M, SPEED_MPS,
+            green, red,
+            obstacle_threshold_m=OBSTACLE_THRESHOLD_M,
+            flashing=False,
+            label="SECOND DRIVE",
         )
 
         if obstacle_hit:
