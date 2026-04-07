@@ -85,7 +85,7 @@ def change_mode(master, *mode_names):  # changes the flight controller mode with
             time.sleep(1)
             return mode
     raise RuntimeError(f"None of these modes were found: {mode_names}. Available: {list(mapping.keys())}")
-    
+
 
 def arm_drone(master):  # engages the motors
     master.mav.command_long_send(
@@ -96,7 +96,16 @@ def arm_drone(master):  # engages the motors
         1, 0, 0, 0, 0, 0, 0,
     )
     log_event("Arming motors...")
-    time.sleep(2)  # wait for the motors to spin up
+
+    arm_deadline = time.time() + 10
+    while time.time() < arm_deadline:
+        if master.motors_armed():
+            log_event("Armed confirmed.")
+            return
+        time.sleep(0.2)
+
+    raise RuntimeError("Arm failed or timed out.")
+
 
 def disarm_drone(master):  # emergency fallback if needed
     master.mav.command_long_send(
@@ -108,12 +117,14 @@ def disarm_drone(master):  # emergency fallback if needed
     )
     log_event("Disarm command sent.")
 
+
 def set_throttle(master, pwm):  # pushes throttle by rc override
     master.mav.rc_channels_override_send(
         master.target_system,
         master.target_component,
         0, 0, pwm, 0, 0, 0, 0, 0,
     )
+
 
 def clear_rc_override(master):  # releases rc override back to the autopilot / radio
     master.mav.rc_channels_override_send(
@@ -163,24 +174,13 @@ def print_altitude(master, prefix="Altitude"):  # prints the current altitude ev
     return alt
 
 
-def wait_for_good_altitude(master, timeout_s=5.0):  # makes sure we actually have altitude data before flying
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        alt, source = get_altitude_m(master)
-        if alt is not None:
-            log_event(f"Altitude source ready: {source}, current altitude {alt:.2f} m")
-            return
-        time.sleep(0.1)
-    raise RuntimeError("No altitude data received from rangefinder or barometer.")
 
-
-def climb_to_target(master, target_alt):  # manual climb like mission 4, then settle near target
+def climb_to_target(master, target_alt):  # manual climb like mission 4, then switch straight into hover
     log_event(f"Climbing to {target_alt:.2f} m...")
 
     set_throttle(master, THROTTLE_IDLE)
     time.sleep(1.0)
 
-    stable_start = None
     while True:
         alt = print_altitude(master, prefix="Climb Alt")
 
@@ -189,23 +189,13 @@ def climb_to_target(master, target_alt):  # manual climb like mission 4, then se
             time.sleep(CLIMB_LOOP_DT)
             continue
 
-        # first push upward until close to target, then settle gently
-        if alt < (target_alt - ALT_TOL):
+        if alt < target_alt:
             set_throttle(master, THROTTLE_CLIMB)
-            stable_start = None
         else:
             set_throttle(master, THROTTLE_HOVER)
-
-            # require the altitude to stay near target briefly before switching to alt hold
-            if abs(alt - target_alt) <= 0.20:
-                if stable_start is None:
-                    stable_start = time.time()
-                elif (time.time() - stable_start) >= 1.2:
-                    print()  # move off the carriage-return line cleanly
-                    log_event(f"Target altitude reached and stabilized: {alt:.2f} m")
-                    return
-            else:
-                stable_start = None
+            print()
+            log_event(f"Target altitude reached: {alt:.2f} m")
+            return
 
         time.sleep(CLIMB_LOOP_DT)
 
@@ -286,8 +276,6 @@ def main():  # the main boss function
     request_message_streams(master)
 
     try:
-        #wait_for_good_altitude(master)
-
         # step 1: start in stabilize like your mission 4 pattern
         change_mode(master, "STABILIZE")
         arm_drone(master)
