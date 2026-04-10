@@ -77,7 +77,25 @@ def broadcast_status(vehicle, bridge, seq):
     bridge.send_telemetry(seq, t_ms, v_mps, 0.0, armed_val, safety_byte)
 
 
-def arm_ugv(vehicle, bridge):
+def arm_ugv(vehicle):
+    if not vehicle.is_armable:
+        print("Warning: vehicle reports not armable; attempting hybrid arm sequence anyway.")
+
+    for label, state in (
+        ("FIRST ARM", True),
+        ("RESET DISARM", False),
+        ("FINAL ARM", True),
+    ):
+        print(f"{label} in mode {vehicle.mode.name}...")
+        vehicle.armed = state
+        if not wait_for_armed(vehicle, state):
+            raise RuntimeError(f"Failed to set armed={state}")
+        time.sleep(1.0)
+
+    print(f"Switching {vehicle.mode.name} -> GUIDED...")
+    vehicle.mode = VehicleMode("GUIDED")
+    if not wait_for_mode(vehicle, "GUIDED"):
+        raise RuntimeError(f"Failed to enter GUIDED mode, current mode: {vehicle.mode.name}")
     if not vehicle.is_armable:
         print("Warning: vehicle reports not armable; attempting hybrid arm sequence anyway.")
 
