@@ -1,3 +1,4 @@
+# UAV Flight Test 3 - Only use if Land mode only landing doesnt work
 from pymavlink import mavutil  # using the confirmed mavlink pattern instead of dronekit
 import time  # for timing and sleeps
 import math  # for simple comparisons
