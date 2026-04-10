@@ -317,8 +317,8 @@ def main():  # the main boss function
         except Exception as land_err:
             log_event(f"Landing fallback error: {land_err}")
             try:
+                change_mode(master, "LAND")
                 clear_rc_override(master)
-                disarm_drone(master)
             except Exception:
                 pass
 

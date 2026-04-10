@@ -9,10 +9,16 @@ UGV_BAUD_RATE = 115200
 
 # Mission parameters
 SPEED_MPH = 0.8
-INITIAL_DISTANCE_FT = 10.0     # y coordinate
-SECOND_DISTANCE_FT = 5.0    # x coordinate
-TURN_ANGLE_DEG = 15.0
-TURN_RATE_DEG_S = 45.0
+INITIAL_DISTANCE_FT = 8.0     # first leg
+SECOND_DISTANCE_FT = 8.0       # second leg
+TURN_ANGLE_DEG = 75.0
+TURN_RATE_DEG_S = 10.0
+TURN_TOLERANCE_DEG = 5.0
+
+# Slow-compass turn tuning
+HEADING_CHECK_INTERVAL_S = 0.20
+STOP_EARLY_DEG = 8.0
+STABLE_COUNT_REQUIRED = 2
 
 # Unit conversions
 FT_TO_M = 0.3048
@@ -107,54 +113,133 @@ def flash_red_tick(last_flash_time):
     return time.time()
 
 
-def turn_left(vehicle, angle_deg, yaw_rate_deg_s, flashing=False):
-    duration_s = abs(angle_deg) / yaw_rate_deg_s
+def get_heading(vehicle):
+    h = vehicle.heading
+    if h is None:
+        raise RuntimeError("vehicle.heading is unavailable")
+    return float(h)
+
+
+def angle_diff_deg(current_deg, start_deg):
+    """
+    Smallest signed angle from start_deg to current_deg, in degrees.
+    Result is in [-180, 180].
+    Positive = clockwise/right
+    Negative = counterclockwise/left
+    """
+    return ((current_deg - start_deg + 540) % 360) - 180
+
+
+def turn_left(vehicle, angle_deg, yaw_rate_deg_s, flashing=False, tolerance_deg=5.0):
+    if angle_deg <= 0:
+        return
+
+    start_heading = get_heading(vehicle)
+    target_change = abs(angle_deg)
+    stop_target = target_change - STOP_EARLY_DEG
+
     turn_msg = build_attitude_msg(
         vehicle,
         throttle_fraction=0.0,
         yaw_rate_deg_s=-abs(yaw_rate_deg_s)
     )
-    start_t = time.time()
+
     last_print = 0.0
     last_flash_time = time.time()
+    stable_count = 0
 
-    print(f"TURN LEFT: angle={angle_deg:.1f} deg  rate={yaw_rate_deg_s:.1f} deg/s")
-    while (time.time() - start_t) < duration_s:
+    print(
+        f"TURN LEFT using slow heading updates: "
+        f"start={start_heading:.1f} target=-{target_change:.1f} "
+        f"stop_target=-{stop_target:.1f}"
+    )
+
+    while True:
         vehicle.send_mavlink(turn_msg)
-        elapsed = time.time() - start_t
+
         if flashing:
             last_flash_time = flash_red_tick(last_flash_time)
-        if elapsed - last_print >= 0.5:
-            print(f"  turning... t={elapsed:3.1f}s")
-            last_print = elapsed
-        time.sleep(0.05)
+
+        time.sleep(HEADING_CHECK_INTERVAL_S)
+
+        current_heading = get_heading(vehicle)
+        delta = angle_diff_deg(current_heading, start_heading)
+
+        now = time.time()
+        if now - last_print >= 0.2:
+            print(f"  heading={current_heading:.1f} delta={delta:.1f}")
+            last_print = now
+
+        if delta <= -(stop_target - tolerance_deg):
+            stable_count += 1
+        else:
+            stable_count = 0
+
+        if stable_count >= STABLE_COUNT_REQUIRED:
+            break
 
     send_stop(vehicle)
+    time.sleep(0.6)
+
+    final_heading = get_heading(vehicle)
+    final_delta = angle_diff_deg(final_heading, start_heading)
+    print(f"TURN LEFT done: final={final_heading:.1f} delta={final_delta:.1f}")
 
 
-def turn_right(vehicle, angle_deg, yaw_rate_deg_s, flashing=False):
-    duration_s = abs(angle_deg) / yaw_rate_deg_s
+def turn_right(vehicle, angle_deg, yaw_rate_deg_s, flashing=False, tolerance_deg=5.0):
+    if angle_deg <= 0:
+        return
+
+    start_heading = get_heading(vehicle)
+    target_change = abs(angle_deg)
+    stop_target = target_change - STOP_EARLY_DEG
+
     turn_msg = build_attitude_msg(
         vehicle,
         throttle_fraction=0.0,
         yaw_rate_deg_s=abs(yaw_rate_deg_s)
     )
-    start_t = time.time()
+
     last_print = 0.0
     last_flash_time = time.time()
+    stable_count = 0
 
-    print(f"TURN RIGHT: angle={angle_deg:.1f} deg  rate={yaw_rate_deg_s:.1f} deg/s")
-    while (time.time() - start_t) < duration_s:
+    print(
+        f"TURN RIGHT using slow heading updates: "
+        f"start={start_heading:.1f} target=+{target_change:.1f} "
+        f"stop_target=+{stop_target:.1f}"
+    )
+
+    while True:
         vehicle.send_mavlink(turn_msg)
-        elapsed = time.time() - start_t
+
         if flashing:
             last_flash_time = flash_red_tick(last_flash_time)
-        if elapsed - last_print >= 0.5:
-            print(f"  turning... t={elapsed:3.1f}s")
-            last_print = elapsed
-        time.sleep(0.05)
+
+        time.sleep(HEADING_CHECK_INTERVAL_S)
+
+        current_heading = get_heading(vehicle)
+        delta = angle_diff_deg(current_heading, start_heading)
+
+        now = time.time()
+        if now - last_print >= 0.2:
+            print(f"  heading={current_heading:.1f} delta={delta:.1f}")
+            last_print = now
+
+        if delta >= (stop_target - tolerance_deg):
+            stable_count += 1
+        else:
+            stable_count = 0
+
+        if stable_count >= STABLE_COUNT_REQUIRED:
+            break
 
     send_stop(vehicle)
+    time.sleep(0.6)
+
+    final_heading = get_heading(vehicle)
+    final_delta = angle_diff_deg(final_heading, start_heading)
+    print(f"TURN RIGHT done: final={final_heading:.1f} delta={final_delta:.1f}")
 
 
 def get_groundspeed(vehicle):
@@ -264,7 +349,13 @@ def main():
         print("UGV armed in GUIDED mode. Starting move...")
         drive_distance(vehicle, INITIAL_DISTANCE_M, SPEED_MPS)
         time.sleep(1.0)
-        turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S, flashing=False)
+        turn_left(
+            vehicle,
+            TURN_ANGLE_DEG,
+            TURN_RATE_DEG_S,
+            flashing=False,
+            tolerance_deg=TURN_TOLERANCE_DEG
+        )
         time.sleep(4.0)
         drive_distance(vehicle, SECOND_DISTANCE_M, SPEED_MPS)
 

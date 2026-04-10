@@ -1,3 +1,4 @@
+# UAV Flight Test 3 - Only use if Land mode only landing doesnt work
 from pymavlink import mavutil  # using the confirmed mavlink pattern instead of dronekit
 import time  # for timing and sleeps
 import math  # for simple comparisons
@@ -13,6 +14,7 @@ BAUD_RATE = 57600                     # serial speed for hardware connections
 
 # mission params
 TARGET_ALT = 1.3          # target hover height in meters
+TARGET_LAND_ALT = 0.5     # target landing height in meters
 HOVER_TIME_S = 8.0        # how long to hold altitude before landing
 ALT_TOL = 0.12            # acceptable altitude error band
 CLIMB_LOOP_DT = 0.10      # climb loop speed
@@ -26,6 +28,7 @@ THROTTLE_MIN = 1000       # motors off / minimum throttle
 THROTTLE_IDLE = 1150      # props spinning but no real lift
 THROTTLE_CLIMB = 1650     # enough lift to climb
 THROTTLE_HOVER = 1500     # mid-stick hover command for alt hold
+THROTTLE_DESCEND = 1350   # gentle descend speed for landing
 
 
 # logging
@@ -132,41 +135,6 @@ def clear_rc_override(master):  # releases rc override back to the autopilot / r
         master.target_component,
         0, 0, 0, 0, 0, 0, 0, 0,
     )
-
-def get_optical_flow_position_x(master): # gets the position data from the optical flow sensor, if available
-    msg = master.recv_match(type="OPTICAL_FLOW", blocking=False)
-    while msg:
-        if msg.quality > 0:
-            pos_x = msg.flow_x
-            return pos_x
-        msg = master.recv_match(type="OPTICAL_FLOW", blocking=False)
-    return None
-
-def get_optical_flow_position_y(master): # gets the position data from the optical flow sensor, if available
-    msg = master.recv_match(type="OPTICAL_FLOW", blocking=False)
-    while msg:
-        if msg.quality > 0:
-            pos_y = msg.flow_y
-            return pos_y
-        msg = master.recv_match(type="OPTICAL_FLOW", blocking=False)
-    return None
-
-def get_optical_flow_quality(master): # gets the quality reading from the optical flow sensor, if available
-    msg = master.recv_match(type="OPTICAL_FLOW", blocking=False)
-    while msg:
-        quality = msg.quality
-        return quality
-    return None
-
-def get_position_estimate(master): # combines the optical flow x and y to get an esitmate of the current position relative to the starting point, if available
-    pos_x = get_optical_flow_position_x(master)
-    pos_y = get_optical_flow_position_y(master)
-    quality = get_optical_flow_quality(master)
-
-    if pos_x is not None and pos_y is not None and quality is not None:
-        return pos_x, pos_y, quality
-    else:
-        return None, None, None
 
 
 def get_rangefinder_alt(master):  # tries the downward sensor first
@@ -279,7 +247,7 @@ def hover_in_alt_hold(master, hover_time_s):  # switches to alt hold and keeps t
     print()
     log_event("Hover segment complete.")
 
-
+MOVEMENT_SPEED = 40
 def move_pitch(master, forward = True, seconds = 1.5):
     move_pwm = 1500
     brake_pwm = 1500
@@ -316,35 +284,50 @@ def move_pitch(master, forward = True, seconds = 1.5):
     set_rc_override(master, pitch=1500, throttle=THROTTLE_HOVER)
     log_event("Hovering at destination.")
 
-def land_safely(master, timeout=10):  # lets land mode do a controlled descent and auto-disarm
+def land_safely(master, target_land_alt = 0.2):  # lets land mode do a controlled descent and auto-disarm
     """
-    Sends a command for the drone to land.
-
-    Args:
-        master (mavutil.mavlink_connection): The MAVLink connection to use.
-        timeout (int): Time in seconds to wait for an acknowledgment.
-
-    Returns:
-        int: mavutil.mavlink.MAV_RESULT enum value.
+    will slowly descend by decreasing the throttle to a gentle descending level
+    once the drone is close to the ground, the drone will enter land mode
     """
-    clear_rc_override(master)
-    time.sleep(0.1)
+    change_mode(master, "STABILIZE")
+    log_event(f"Descending to {target_land_alt:.2f} m...")
 
-    # Send a command to land
-    master.mav.command_long_send(
-        master.target_system, 
-        master.target_component,
-        mavutil.mavlink.MAV_CMD_NAV_LAND, 
-        0, 0, 0, 0, 0, 0, 0, 0
-    )
+    set_throttle(master, THROTTLE_HOVER)
+    time.sleep(1.0)
 
-    # Wait for the acknowledgment
-    ack = master.recv_match(type='COMMAND_ACK', blocking=True, timeout=timeout)
-    if ack is None:
-        print('No acknowledgment received within the timeout period.')
-        return None
+    alt = print_altitude(master, prefix="Landing Alt")
 
-    return ack.result
+    stable_start = None
+    while True:
+        alt = print_altitude(master, prefix="Landing Alt")
+
+        if alt is None:
+            set_throttle(master, THROTTLE_HOVER)
+            time.sleep(CLIMB_LOOP_DT)
+            continue
+
+        # first push downward until close to target, then settle gently
+        if alt > (target_land_alt + ALT_TOL):
+            set_throttle(master, THROTTLE_DESCEND)
+            stable_start = None
+        else:
+            set_throttle(master, THROTTLE_IDLE)
+
+            # require the altitude to stay near target briefly before switching to alt hold
+            if abs(alt - target_land_alt) <= 0.20:
+                if stable_start is None:
+                    stable_start = time.time()
+                elif (time.time() - stable_start) >= 1.2:
+                    print()  # move off the carriage-return line cleanly
+                    log_event(f"Target altitude reached and stabilized: {alt:.2f} m")
+                    change_mode(master, "LAND")
+                    return
+            else:
+                stable_start = None
+
+        time.sleep(CLIMB_LOOP_DT)
+
+    
 
 #################### the main mission logic
 
@@ -379,25 +362,6 @@ def main():  # the main boss function
 
         # step 3: maintain altitude using alt hold
         hover_in_alt_hold(master, 5.0)
-
-        #step 4: test if position values are coming through and print them
-        log_event("Testing optical flow position readings for 10 seconds...")
-        start_t = time.time()
-        while (time.time() - start_t) < 10.0:
-            pos_x, pos_y, quality = get_position_estimate(master)
-            if pos_x is not None and pos_y is not None:
-                print(f"Optical Flow Position - X: {pos_x:.2f}, Y: {pos_y:.2f}, Quality: {quality}", end="\r", flush=True)
-            else:
-                print("Waiting for optical flow data...")
-            time.sleep(0.1)
-
-        '''
-        #step 4: move forward a few feet
-        move_pitch(master, True, 1.0)
-
-        #step 5: move backward a few feet
-        move_pitch(master, False, 1.0)
-        '''
         # step 5: safely and slowly land
         land_safely(master)
 
@@ -418,8 +382,8 @@ def main():  # the main boss function
         print()
         log_event(f"Mission error: {e}")
         try:
-            change_mode(master, "LAND")
             land_safely(master)
+            change_mode(master, "LAND")
         except Exception:
             pass
         time.sleep(1)
