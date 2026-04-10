@@ -292,6 +292,8 @@ def land_safely(master, timeout=10):  # lets land mode do a controlled descent a
     Returns:
         int: mavutil.mavlink.MAV_RESULT enum value.
     """
+    clear_rc_override(master)
+    time.sleep(0.1)
 
     # Send a command to land
     master.mav.command_long_send(
@@ -341,14 +343,15 @@ def main():  # the main boss function
         climb_to_target(master, TARGET_ALT)
 
         # step 3: maintain altitude using alt hold
-        hover_in_alt_hold(master, HOVER_TIME_S)
-
+        hover_in_alt_hold(master, 5.0)
+        
+        '''
         #step 4: move forward a few feet
         move_pitch(master, True, 1.0)
 
         #step 5: move backward a few feet
         move_pitch(master, False, 1.0)
-
+        '''
         # step 5: safely and slowly land
         land_safely(master)
 
@@ -370,7 +373,7 @@ def main():  # the main boss function
         log_event(f"Mission error: {e}")
         try:
             change_mode(master, "LAND")
-            clear_rc_override(master)
+            land_safely(master)
         except Exception:
             pass
         time.sleep(1)
