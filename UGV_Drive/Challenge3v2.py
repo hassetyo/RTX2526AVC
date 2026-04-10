@@ -407,7 +407,7 @@ def avoid_obstacle(vehicle, lidar_ser, green, red, depth=0):
 
     # 1) Turn away from obstacle
     turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S, green, red, flashing=True)
-    time.sleep(1.0)
+    time.sleep(4.0)
 
     # 2) Side-step leg (still monitor for obstacles)
     result = drive_forward(
@@ -422,11 +422,11 @@ def avoid_obstacle(vehicle, lidar_ser, green, red, depth=0):
         print("Obstacle detected during side-step 1. Re-running avoidance.")
         return avoid_obstacle(vehicle, lidar_ser, green, red, depth + 1)
 
-    time.sleep(1.0)
+    time.sleep(4.0)
 
     # 3) Re-orient parallel to original path
     turn_right(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S, green, red, flashing=True)
-    time.sleep(1.0)
+    time.sleep(4.0)
 
     # 4) Bypass forward leg (this contributes estimated progress)
     result = drive_forward(
@@ -441,11 +441,11 @@ def avoid_obstacle(vehicle, lidar_ser, green, red, depth=0):
         print("Obstacle detected during bypass forward. Re-running avoidance.")
         return avoid_obstacle(vehicle, lidar_ser, green, red, depth + 1)
 
-    time.sleep(1.0)
+    time.sleep(4.0)
 
     # 5) Turn back toward original line
     turn_right(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S, green, red, flashing=True)
-    time.sleep(1.0)
+    time.sleep(4.0)
 
     # 6) Return sideways toward original path line
     result = drive_forward(
@@ -460,11 +460,11 @@ def avoid_obstacle(vehicle, lidar_ser, green, red, depth=0):
         print("Obstacle detected during return side-step 2. Re-running avoidance.")
         return avoid_obstacle(vehicle, lidar_ser, green, red, depth + 1)
 
-    time.sleep(1.0)
+    time.sleep(4.0)
 
     # 7) Restore original heading
     turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S, green, red, flashing=True)
-    time.sleep(1.0)
+    time.sleep(4.0)
 
     print(
         "Avoidance complete. "
@@ -569,7 +569,7 @@ def main():
         )
 
         turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S, green, red, flashing=True)
-        time.sleep(1.0)
+        time.sleep(4.0)
 
         execute_leg(
             vehicle, lidar_ser, green, red,
