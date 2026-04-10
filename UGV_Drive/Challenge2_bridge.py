@@ -25,6 +25,7 @@ ESP32_BRIDGE_PORT = "/dev/ttyUSB0"
 # Motion tuning
 # ----------------------------
 SPEED_MPH = 0.8
+TURN_ANGLE_DEG = 75.0
 TURN_RATE_DEG_S = 10.0
 TURN_TOLERANCE_DEG = 5.0
 MOVEMENT_EPS_MPS = 0.05
@@ -366,7 +367,7 @@ def execute_challenge2_move(vehicle, bridge, x_m, y_m):
     send_stop(vehicle)
     time.sleep(1.0)
 
-    turn_left(vehicle, bridge, 90.0, TURN_RATE_DEG_S, TURN_TOLERANCE_DEG)
+    turn_left(vehicle, bridge, TURN_ANGLE_DEG, TURN_RATE_DEG_S, TURN_TOLERANCE_DEG)
     time.sleep(4.0)
     drive_distance(vehicle, bridge, second_leg, SPEED_MPS)
     send_stop(vehicle)
