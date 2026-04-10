@@ -234,7 +234,7 @@ def hover_in_alt_hold(master, hover_time_s):  # switches to alt hold and keeps t
     log_event("Hover segment complete.")
 
 
-def land(the_connection, timeout=10):  # sends MAV_CMD_NAV_LAND and waits for ack
+def land(the_connection, timeout=10):  # sends MAV_CMD_NAV_LAND, then monitors until confirmed on the ground
     the_connection.mav.command_long_send(
         the_connection.target_system,
         the_connection.target_component,
@@ -245,7 +245,29 @@ def land(the_connection, timeout=10):  # sends MAV_CMD_NAV_LAND and waits for ac
     if ack is None:
         log_event("No acknowledgment received within the timeout period.")
         return None
-    return ack.result
+
+    log_event("Land command acknowledged. Monitoring descent...")
+    clear_rc_override(the_connection)
+
+    deadline = time.time() + LAND_TIMEOUT_S
+    confirmed_low = False  # only true once altitude has actually reached the ground threshold
+
+    while time.time() < deadline:
+        alt = print_altitude(the_connection, prefix="Land Alt")
+
+        # mark that we have physically reached ground level
+        if alt is not None and alt <= 0.08:
+            confirmed_low = True
+
+        # only accept a disarm as a real touchdown if we already saw near-zero altitude
+        if confirmed_low and not the_connection.motors_armed():
+            print()
+            log_event("Touchdown confirmed. Motors stopped.")
+            return ack.result
+
+        time.sleep(LAND_LOOP_DT)
+
+    raise RuntimeError("Landing timed out before touchdown confirmation.")
 
 
 
