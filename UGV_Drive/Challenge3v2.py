@@ -29,7 +29,7 @@ AVOIDANCE_DISTANCE_FT    = 2.0   # side-step leg length for avoidance path
 BYPASS_FORWARD_DISTANCE_FT = 3.0 # forward leg while bypassing obstacle
 OBSTACLE_THRESHOLD_FT    = 1.5   # lidar trigger threshold
 SPEED_MPH                = 0.8
-TURN_ANGLE_DEG           = 70.0
+TURN_ANGLE_DEG           = 55.0
 TURN_RATE_DEG_S          = 20.0
 
 # Estimated forward progress gained along the original mission direction
