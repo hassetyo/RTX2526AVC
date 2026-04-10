@@ -2,11 +2,13 @@
 UAV Vision Module for ArUco Marker Detection
 Detects markers and provides position data for UAV-UGV coordination
 """
+
 import cv2
 import cv2.aruco as aruco
 import numpy as np
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
+
 
 @dataclass
 class MarkerPosition:
@@ -18,23 +20,24 @@ class MarkerPosition:
     distance: float  # Total distance (meters)
     detected: bool = True
 
+
 class CameraInterface:
     """Handles camera initialization and frame capture"""
-    
+
     def __init__(self, use_zed: bool = False, camera_index: int = 0):
         self.use_zed = use_zed
         self.camera_index = camera_index
         self.cap = None
         self.zed = None
         print(f"Initializing {'ZED' if use_zed else 'Standard'} camera...")
-        
+
         if self.use_zed:
             self._initialize_zed()
         else:
             self._initialize_standard()
-        
+
         print("Camera initialized successfully")
-    
+
     def _initialize_zed(self):
         """Initialize ZED camera"""
         import pyzed.sl as sl
@@ -43,18 +46,21 @@ class CameraInterface:
         init_params.camera_resolution = sl.RESOLUTION.HD1080
         init_params.depth_mode = sl.DEPTH_MODE.NONE
         self.zed.set_camera_settings(sl.VIDEO_SETTINGS.EXPOSURE, 1)
-        
+
         status = self.zed.open(init_params)
         if status != sl.ERROR_CODE.SUCCESS:
             raise RuntimeError(f"ZED camera error: {status}")
-    
+
     def _initialize_standard(self):
-        """Initialize standard USB camera"""
-        self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_AVFOUNDATION)
+        """Initialize standard USB camera on Windows"""
+        self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+
         if not self.cap.isOpened():
-            raise RuntimeError("Failed to open standard camera")
-        
-        # Set resolution
+            self.cap = cv2.VideoCapture(self.camera_index)
+
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Failed to open standard camera at index {self.camera_index}")
+
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
@@ -64,19 +70,19 @@ class CameraInterface:
             return self._get_zed_frame()
         else:
             return self._get_standard_frame()
-    
+
     def _get_zed_frame(self) -> Optional[np.ndarray]:
         """Get frame from ZED camera"""
         import pyzed.sl as sl
         if self.zed.grab() != sl.ERROR_CODE.SUCCESS:
             print("Error grabbing ZED frame")
             return None
-        
+
         image = sl.Mat()
         self.zed.retrieve_image(image, sl.VIEW.LEFT)
         frame = image.get_data()
         return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-    
+
     def _get_standard_frame(self) -> Optional[np.ndarray]:
         """Get frame from standard camera"""
         ret, frame = self.cap.read()
@@ -84,7 +90,7 @@ class CameraInterface:
             print("Error grabbing standard frame")
             return None
         return frame
-    
+
     def close(self):
         """Release camera resources"""
         if self.use_zed and self.zed:
@@ -101,28 +107,16 @@ class CenterZone:
     """
 
     def __init__(self, box_width: int = 200, box_height: int = 200):
-        """
-        Args:
-            box_width:  Total width of the acceptance box in pixels.
-            box_height: Total height of the acceptance box in pixels.
-        """
         self.box_width = box_width
         self.box_height = box_height
 
     def resize(self, box_width: int, box_height: int):
-        """Update the box dimensions at runtime."""
         self.box_width = box_width
         self.box_height = box_height
         print(f"Center zone resized to {box_width}x{box_height}px")
 
     def bounds(self, frame_w: int, frame_h: int) -> Tuple[int, int, int, int]:
-        """
-        Return pixel coordinates of the box edges.
-
-        Returns:
-            (x_min, y_min, x_max, y_max)
-        """
-        cx, cy = frame_w / 2.0, frame_h / 2.0
+        cx, cy = frame_w / 2.0, frame_h * 0.8
         half_w = self.box_width / 2.0
         half_h = self.box_height / 2.0
         return (
@@ -133,21 +127,10 @@ class CenterZone:
         )
 
     def contains(self, dx: float, dy: float) -> bool:
-        """
-        Check whether a marker offset (dx, dy from frame centre) falls inside
-        the box.  dx/dy are signed pixel offsets – sign convention matches
-        OpenCV (right is +x, down is +y).
-        """
         return (abs(dx) <= self.box_width / 2.0 and
                 abs(dy) <= self.box_height / 2.0)
 
     def draw(self, frame: np.ndarray, in_zone: bool) -> np.ndarray:
-        """
-        Draw the centre-zone box on *frame* in-place.
-
-        Box is green when the target marker is inside, red when outside (or
-        not detected).
-        """
         h, w = frame.shape[:2]
         x_min, y_min, x_max, y_max = self.bounds(w, h)
         color = (0, 255, 0) if in_zone else (0, 0, 255)
@@ -161,61 +144,76 @@ class CenterZone:
 
 class ArucoDetector:
     """Handles ArUco marker detection and pose estimation"""
-    
+
     def __init__(self, calibration_file: str, marker_size: float = 0.1,
                  dictionary=aruco.DICT_6X6_1000):
-        """
-        Initialize ArUco detector
-        
-        Args:
-            calibration_file: Path to camera calibration YAML file
-            marker_size: Physical size of markers in meters
-            dictionary: ArUco dictionary to use
-        """
         self.marker_size = marker_size
         self.aruco_dict = aruco.getPredefinedDictionary(dictionary)
         self.camera_matrix, self.dist_coeffs = self._load_calibration(calibration_file)
+
+        self.detector_params = aruco.DetectorParameters()
+        self.detector = aruco.ArucoDetector(self.aruco_dict, self.detector_params)
+
         print(f"Loaded calibration from {calibration_file}")
         print(f"Marker size: {marker_size}m, Dictionary: DICT_6X6_1000")
-    
+
     def _load_calibration(self, file_path: str) -> Tuple[np.ndarray, np.ndarray]:
-        """Load camera calibration from YAML file"""
         fs = cv2.FileStorage(file_path, cv2.FILE_STORAGE_READ)
         camera_matrix = fs.getNode("K").mat()
         dist_coeffs = fs.getNode("D").mat()
         fs.release()
-        
+
         if camera_matrix is None or dist_coeffs is None:
             raise ValueError(f"Invalid calibration file: {file_path}")
-        
+
         return camera_matrix, dist_coeffs
-    
+
+    def _estimate_single_marker_pose(self, corner: np.ndarray):
+        """
+        Estimate pose for one detected marker using solvePnP.
+        Replaces old aruco.estimatePoseSingleMarkers() for newer OpenCV builds.
+        """
+        half_size = self.marker_size / 2.0
+
+        object_points = np.array([
+            [-half_size,  half_size, 0.0],
+            [ half_size,  half_size, 0.0],
+            [ half_size, -half_size, 0.0],
+            [-half_size, -half_size, 0.0],
+        ], dtype=np.float32)
+
+        image_points = corner.reshape((4, 2)).astype(np.float32)
+
+        success, rvec, tvec = cv2.solvePnP(
+            object_points,
+            image_points,
+            self.camera_matrix,
+            self.dist_coeffs,
+            flags=cv2.SOLVEPNP_IPPE_SQUARE
+        )
+
+        if not success:
+            return None, None
+
+        return rvec, tvec
+
     def detect(self, frame: np.ndarray) -> List[MarkerPosition]:
-        """
-        Detect ArUco markers and estimate their positions
-        
-        Args:
-            frame: Input image frame
-        
-        Returns:
-            List of MarkerPosition objects for detected markers
-        """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = aruco.detectMarkers(gray, self.aruco_dict)
-        
+        corners, ids, _ = self.detector.detectMarkers(gray)
+
         positions = []
-        
+
         if ids is not None:
             for i, marker_id in enumerate(ids.flatten()):
-                rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(
-                    corners[i], self.marker_size, 
-                    self.camera_matrix, self.dist_coeffs
-                )
-                
-                tvec = tvecs[0].flatten()
+                rvec, tvec = self._estimate_single_marker_pose(corners[i])
+
+                if rvec is None or tvec is None:
+                    continue
+
+                tvec = tvec.flatten()
                 x, y, z = tvec[0], tvec[1], tvec[2]
                 distance = np.linalg.norm(tvec)
-                
+
                 position = MarkerPosition(
                     marker_id=int(marker_id),
                     x=float(x),
@@ -224,121 +222,92 @@ class ArucoDetector:
                     distance=float(distance)
                 )
                 positions.append(position)
-        
+
         return positions
-    
+
     def draw_detections(self, frame: np.ndarray, positions: List[MarkerPosition]) -> np.ndarray:
-        """
-        Draw detected markers and their information on the frame
-        
-        Args:
-            frame: Input frame
-            positions: List of detected marker positions
-        
-        Returns:
-            Annotated frame
-        """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = aruco.detectMarkers(gray, self.aruco_dict)
-        
+        corners, ids, _ = self.detector.detectMarkers(gray)
+
         if ids is not None:
-            # Draw marker boundaries
             frame = aruco.drawDetectedMarkers(frame, corners, ids)
-            
-            # Draw axes and labels for each marker
+
             for i, marker_id in enumerate(ids.flatten()):
-                rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(
-                    corners[i], self.marker_size,
-                    self.camera_matrix, self.dist_coeffs
+                rvec, tvec = self._estimate_single_marker_pose(corners[i])
+
+                if rvec is None or tvec is None:
+                    continue
+
+                rvec = rvec.flatten()
+                tvec = tvec.flatten()
+
+                cv2.drawFrameAxes(
+                    frame,
+                    self.camera_matrix,
+                    self.dist_coeffs,
+                    rvec,
+                    tvec,
+                    self.marker_size * 0.5
                 )
-                
-                rvec = rvecs[0].flatten()
-                tvec = tvecs[0].flatten()
-                
-                # Draw 3D axes
-                cv2.drawFrameAxes(frame, self.camera_matrix, self.dist_coeffs,
-                                rvec, tvec, self.marker_size * 0.5)
-                
-                # Find matching position data
+
                 position = next((p for p in positions if p.marker_id == marker_id), None)
                 if position:
-                    # Add label
                     corner = corners[i][0]
                     center = np.mean(corner, axis=0).astype(int)
-                    
+
                     color = (0, 255, 0) if marker_id == 0 else (0, 0, 255)
                     label = f"ID:{marker_id} D:{position.distance:.2f}m"
-                    
-                    cv2.putText(frame, label, tuple(center), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
-        
+
+                    cv2.putText(
+                        frame,
+                        label,
+                        tuple(center),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        color,
+                        2,
+                        cv2.LINE_AA
+                    )
+
         return frame
 
 
 class UAVVision:
     """Main vision system for UAV"""
-    
+
     def __init__(self, calibration_file: str = "calibration_chessboard.yaml",
                  marker_size: float = 0.1, use_zed: bool = False,
-                 zone_box_width: int = 200, zone_box_height: int = 200):
-        """
-        Initialize UAV vision system
-
-        Args:
-            calibration_file:  Path to calibration file
-            marker_size:       Marker size in meters
-            use_zed:           Use ZED camera if True, standard camera if False
-            zone_box_width:    Width of the centre-zone acceptance box (pixels)
-            zone_box_height:   Height of the centre-zone acceptance box (pixels)
-        """
-        self.camera = CameraInterface(use_zed=use_zed)
+                 zone_box_width: int = 200, zone_box_height: int = 200,
+                 camera_index: int = 0):
+        self.camera = CameraInterface(use_zed=use_zed, camera_index=camera_index)
         self.detector = ArucoDetector(calibration_file, marker_size)
-        self.target_marker_id = 0  # Default target marker ID
+        self.target_marker_id = 0
         self.center_zone = CenterZone(zone_box_width, zone_box_height)
-    
+
     def get_target_position(self) -> Optional[MarkerPosition]:
-        """
-        Get position of the target marker (ID 0 by default)
-        
-        Returns:
-            MarkerPosition if target found, None otherwise
-        """
         frame = self.camera.get_frame()
         if frame is None:
             return None
-        
+
         positions = self.detector.detect(frame)
-        
-        # Find target marker
         target = next((p for p in positions if p.marker_id == self.target_marker_id), None)
         return target
-    
+
     def process_frame(self, display: bool = True) -> Tuple[Optional[List[MarkerPosition]], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
-        """
-        Process a single frame: detect markers and optionally display
-        
-        Args:
-            display: If True, show annotated frame
-        
-        Returns:
-            Tuple of (positions list, annotated frame, corners, ids)
-        """
         frame = self.camera.get_frame()
         if frame is None:
             return None, None, None, None
-        
+
         positions = self.detector.detect(frame)
         annotated_frame = self.detector.draw_detections(frame.copy(), positions)
 
-        # Reuse same detection logic to get marker image centers
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = aruco.detectMarkers(gray, self.detector.aruco_dict)
+        corners, ids, _ = self.detector.detector.detectMarkers(gray)
 
         frame_h, frame_w = annotated_frame.shape[:2]
         frame_center_x = frame_w / 2.0
         frame_center_y = frame_h / 2.0
 
-        # Determine whether the target marker is inside the zone (for box colour)
         target_in_zone = False
         if ids is not None:
             target_index = next(
@@ -352,41 +321,34 @@ class UAVVision:
                 target_in_zone = self.center_zone.contains(dx, dy)
 
         if display:
-            # Draw centre-zone box (green = in zone, red = out / not detected)
             self.center_zone.draw(annotated_frame, target_in_zone)
 
-            # Draw a small crosshair at the exact frame centre
             cx, cy = int(frame_center_x), int(frame_center_y)
             cv2.drawMarker(annotated_frame, (cx, cy), (255, 255, 255),
                            cv2.MARKER_CROSS, 20, 1, cv2.LINE_AA)
 
-            # Add pose overlay text
             for i, pos in enumerate(positions):
                 info = (f"ID {pos.marker_id}: "
                         f"X:{pos.x:.2f} Y:{pos.y:.2f} Z:{pos.z:.2f} "
                         f"D:{pos.distance:.2f}m")
                 cv2.putText(annotated_frame, info, (10, 30 + i * 30),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
-            
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+
             cv2.imshow("UAV Vision", annotated_frame)
-        
+
         return positions, annotated_frame, corners, ids
-    
+
     def close(self):
-        """Cleanup resources"""
         self.camera.close()
 
 
 def main():
-    """Test the vision system"""
     print("UAV Vision System Test")
     print("Press 'q' to quit")
     print("Press '+' / '-' to grow or shrink the centre zone by 20px")
 
-    # ── Tweak the box size here ──────────────────────────────────────────────
-    ZONE_BOX_WIDTH  = 200   # pixels
-    ZONE_BOX_HEIGHT = 200   # pixels
-    # ────────────────────────────────────────────────────────────────────────
+    ZONE_BOX_WIDTH = 200
+    ZONE_BOX_HEIGHT = 200
 
     vision = UAVVision(
         calibration_file="calibration_chessboard.yaml",
@@ -394,12 +356,13 @@ def main():
         use_zed=False,
         zone_box_width=ZONE_BOX_WIDTH,
         zone_box_height=ZONE_BOX_HEIGHT,
+        camera_index=0,
     )
-    
+
     try:
         while True:
             positions, frame, corners, ids = vision.process_frame(display=True)
-            
+
             if positions and frame is not None and ids is not None:
                 frame_h, frame_w = frame.shape[:2]
                 frame_center_x = frame_w / 2.0
@@ -413,13 +376,10 @@ def main():
                     in_zone = vision.center_zone.contains(dx, dy)
 
                     if in_zone:
-                        print(f"Marker {pos.marker_id}: INSIDE zone "
-                              f"(dx={dx:.1f}px, dy={dy:.1f}px)")
+                        print(f"Marker {pos.marker_id}: INSIDE zone (dx={dx:.1f}px, dy={dy:.1f}px)")
                     else:
-                        print(f"Marker {pos.marker_id}: OUTSIDE zone — "
-                              f"offset dx={dx:.1f}px, dy={dy:.1f}px")
+                        print(f"Marker {pos.marker_id}: OUTSIDE zone — offset dx={dx:.1f}px, dy={dy:.1f}px")
 
-                # Specific report for the target marker
                 target_index = next(
                     (i for i, p in enumerate(positions)
                      if p.marker_id == vision.target_marker_id), None
@@ -433,22 +393,20 @@ def main():
                     if in_zone:
                         print(">>> TARGET FOUND: inside centre zone ✓")
                     else:
-                        print(f">>> TARGET FOUND: outside centre zone — "
-                              f"dx={dx:.1f}px, dy={dy:.1f}px")
+                        print(f">>> TARGET FOUND: outside centre zone — dx={dx:.1f}px, dy={dy:.1f}px")
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
-            # Grow / shrink the centre zone interactively
             elif key == ord('+') or key == ord('='):
-                w = vision.center_zone.box_width  + 20
+                w = vision.center_zone.box_width + 20
                 h = vision.center_zone.box_height + 20
                 vision.center_zone.resize(w, h)
             elif key == ord('-'):
-                w = max(20, vision.center_zone.box_width  - 20)
+                w = max(20, vision.center_zone.box_width - 20)
                 h = max(20, vision.center_zone.box_height - 20)
                 vision.center_zone.resize(w, h)
-    
+
     finally:
         vision.close()
         print("Vision system closed")
