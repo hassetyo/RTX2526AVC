@@ -99,15 +99,6 @@ def arm_drone(master):  # engages the motors
     )
     log_event("Arming motors...")
 
-    arm_deadline = time.time() + 10
-    while time.time() < arm_deadline:
-        if master.motors_armed():
-            log_event("Armed confirmed.")
-            return
-        time.sleep(0.2)
-
-    raise RuntimeError("Arm failed or timed out.")
-
 
 def disarm_drone(master):  # emergency fallback if needed
     master.mav.command_long_send(
