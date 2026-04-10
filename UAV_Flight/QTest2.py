@@ -2,7 +2,7 @@ from pymavlink import mavutil  # using the confirmed mavlink pattern instead of 
 import time  # for timing and sleeps
 import math  # for simple comparisons
 
-# uav simple altitude mission - arm + climb + hover + land
+# uav simple altitude mission - arm + climb + hover + move + land
 # keeps the overall style close to mission 4 but removes rover/radio pieces
 # uses stabilize for liftoff, alt hold for hover, and land for a gentle touchdown
 
@@ -290,35 +290,33 @@ def move_pitch(master, forward = True, seconds = 1.5):
     set_rc_override(master, pitch=1500, throttle=THROTTLE_HOVER)
     log_event("Hovering at destination.")
 
-def land_safely(master):  # lets land mode do a controlled descent and auto-disarm
-    log_event("Landing sequence engaged...")
-    change_mode(master, "LAND")
-    clear_rc_override(master)  # let land mode fully control the descent
+def land_safely(master, timeout=10):  # lets land mode do a controlled descent and auto-disarm
+    """
+    Sends a command for the drone to land.
 
-    deadline = time.time() + LAND_TIMEOUT_S
-    while time.time() < deadline:
-        alt = print_altitude(master, prefix="Land Alt")
+    Args:
+        master (mavutil.mavlink_connection): The MAVLink connection to use.
+        timeout (int): Time in seconds to wait for an acknowledgment.
 
-        if not master.motors_armed():
-            print()
-            log_event("Touchdown confirmed. Motors stopped.")
-            return
+    Returns:
+        int: mavutil.mavlink.MAV_RESULT enum value.
+    """
 
-        # fallback: if we appear to be on the ground but still armed for a while, try disarm once
-        if alt is not None and alt <= 0.08:
-            time.sleep(2.0)
-            if master.motors_armed():
-                log_event("Very low altitude detected for 2s; sending disarm fallback.")
-                disarm_drone(master)
-                time.sleep(1.0)
-                if not master.motors_armed():
-                    print()
-                    log_event("Touchdown confirmed after fallback disarm.")
-                    return
+    # Send a command to land
+    master.mav.command_long_send(
+        master.target_system, 
+        master.target_component,
+        mavutil.mavlink.MAV_CMD_NAV_LAND, 
+        0, 0, 0, 0, 0, 0, 0, 0
+    )
 
-        time.sleep(LAND_LOOP_DT)
+    # Wait for the acknowledgment
+    ack = master.recv_match(type='COMMAND_ACK', blocking=True, timeout=timeout)
+    if ack is None:
+        print('No acknowledgment received within the timeout period.')
+        return None
 
-    raise RuntimeError("Landing timed out before disarm confirmation.")
+    return ack.result
 
 #################### the main mission logic
 
@@ -327,7 +325,7 @@ def main():  # the main boss function
         f.write("")
 
     log_event("==========================================")
-    log_event("   UAV ALT HOLD HOVER + SAFE LAND MISSION")
+    log_event("   UAV MOVEMENT TEST + SAFE LAND MISSION")
     log_event("==========================================")
 
     log_event(f"Connecting to Drone: {CONNECTION_STRING}...")
