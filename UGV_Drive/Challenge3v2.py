@@ -23,14 +23,14 @@ GREEN_LED_PIN = 16
 RED_LED_PIN   = 19
 
 # Mission Parameters
-INITIAL_DISTANCE_FT      = 12.0   # first leg
+INITIAL_DISTANCE_FT      = 8.0   # first leg
 SECOND_DISTANCE_FT       = 8.0   # second leg
 AVOIDANCE_DISTANCE_FT    = 2.0   # side-step leg length for avoidance path
 BYPASS_FORWARD_DISTANCE_FT = 3.0 # forward leg while bypassing obstacle
 OBSTACLE_THRESHOLD_FT    = 1.5   # lidar trigger threshold
 SPEED_MPH                = 0.8
 TURN_ANGLE_DEG           = 50.0
-TURN_RATE_DEG_S          = 20.0
+TURN_RATE_DEG_S          = 45.0
 
 # Estimated forward progress gained along the original mission direction
 # from ONE completed avoidance maneuver.
@@ -413,7 +413,7 @@ def avoid_obstacle(vehicle, lidar_ser, green, red, depth=0):
                   flashing=True, label="AVOID RIGHT")
     time.sleep(4.0)
 
-    turn_right(vehicle, TURN_ANGLE_DEG-10, TURN_RATE_DEG_S,
+    turn_right(vehicle, TURN_ANGLE_DEG-7, TURN_RATE_DEG_S,
               green, red, flashing=True)
     time.sleep(4.0)
 
@@ -422,7 +422,7 @@ def avoid_obstacle(vehicle, lidar_ser, green, red, depth=0):
                   flashing=True, label="BYPASS FORWARD")
     time.sleep(4.0)
 
-    turn_right(vehicle, TURN_ANGLE_DEG-10, TURN_RATE_DEG_S,
+    turn_right(vehicle, TURN_ANGLE_DEG-7, TURN_RATE_DEG_S,
               green, red, flashing=True)
     time.sleep(4.0)
 
