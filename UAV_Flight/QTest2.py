@@ -133,6 +133,41 @@ def clear_rc_override(master):  # releases rc override back to the autopilot / r
         0, 0, 0, 0, 0, 0, 0, 0,
     )
 
+def get_optical_flow_position_x(master): # gets the position data from the optical flow sensor, if available
+    msg = master.recv_match(type="OPTICAL_FLOW", blocking=False)
+    while msg:
+        if msg.quality > 0:
+            pos_x = msg.flow_x
+            return pos_x
+        msg = master.recv_match(type="OPTICAL_FLOW", blocking=False)
+    return None
+
+def get_optical_flow_position_y(master): # gets the position data from the optical flow sensor, if available
+    msg = master.recv_match(type="OPTICAL_FLOW", blocking=False)
+    while msg:
+        if msg.quality > 0:
+            pos_y = msg.flow_y
+            return pos_y
+        msg = master.recv_match(type="OPTICAL_FLOW", blocking=False)
+    return None
+
+def get_optical_flow_quality(master): # gets the quality reading from the optical flow sensor, if available
+    msg = master.recv_match(type="OPTICAL_FLOW", blocking=False)
+    while msg:
+        quality = msg.quality
+        return quality
+    return None
+
+def get_position_estimate(master): # combines the optical flow x and y to get an esitmate of the current position relative to the starting point, if available
+    pos_x = get_optical_flow_position_x(master)
+    pos_y = get_optical_flow_position_y(master)
+    quality = get_optical_flow_quality(master)
+
+    if pos_x is not None and pos_y is not None and quality is not None:
+        return pos_x, pos_y, quality
+    else:
+        return None, None, None
+
 
 def get_rangefinder_alt(master):  # tries the downward sensor first
     msg = master.recv_match(type="DISTANCE_SENSOR", blocking=False)
@@ -244,7 +279,7 @@ def hover_in_alt_hold(master, hover_time_s):  # switches to alt hold and keeps t
     print()
     log_event("Hover segment complete.")
 
-MOVEMENT_SPEED = 40
+
 def move_pitch(master, forward = True, seconds = 1.5):
     move_pwm = 1500
     brake_pwm = 1500
@@ -344,7 +379,18 @@ def main():  # the main boss function
 
         # step 3: maintain altitude using alt hold
         hover_in_alt_hold(master, 5.0)
-        
+
+        #step 4: test if position values are coming through and print them
+        log_event("Testing optical flow position readings for 10 seconds...")
+        start_t = time.time()
+        while (time.time() - start_t) < 10.0:
+            pos_x, pos_y, quality = get_position_estimate(master)
+            if pos_x is not None and pos_y is not None:
+                print(f"Optical Flow Position - X: {pos_x:.2f}, Y: {pos_y:.2f}, Quality: {quality}", end="\r", flush=True)
+            else:
+                print("Waiting for optical flow data...", end="\r", flush=True)
+            time.sleep(0.1)
+
         '''
         #step 4: move forward a few feet
         move_pitch(master, True, 1.0)
