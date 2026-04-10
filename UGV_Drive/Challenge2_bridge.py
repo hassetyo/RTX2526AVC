@@ -382,7 +382,7 @@ def turn_right(vehicle, bridge, angle_deg, yaw_rate_deg_s, tolerance_deg=5.0):
 
 def execute_challenge2_move(vehicle, bridge, x_m, y_m):
     print("==========================================")
-    print("Executing Challenge 2 style move")
+    print("Executing Challenge 2: Move to (x,y)")
     print(f"Received target from UAV: x={x_m:.3f} m, y={y_m:.3f} m")
     print("Convention: x = forward/back, y = right/left")
     print("Plan: drive |x|, turn toward y, drive |y|")
