@@ -13,7 +13,7 @@ SOF = 0xAA         # Start of packet marker (The "Wait for it..." byte)
 TYPE_TELEM = 1     # status/telemetry (UAV stats)
 TYPE_CMD = 2       # missions/instructions (UGV orders)
 TYPE_MSG = 3       # raw crap talking strings (debugging)
-TYPE_TARGET = 4
+
 # command codes for the UGV mission engine
 CMD_ARM          = 1  # wake up the motors
 CMD_DISARM       = 2  # sleep the motors
@@ -24,7 +24,6 @@ CMD_MOVE_2FT     = 6  # drive 2ft
 CMD_TURN_RIGHT   = 7  # pivot right 90
 CMD_TURN_LEFT    = 8  # pivot left 90
 CMD_CIRCLE       = 9  # double circle stunt
-CMD_START_MISSION = 21
 
 # mode identifiers for the Pixhawk
 MODE_INITIAL  = 0 # just turned on
@@ -36,7 +35,6 @@ MODE_DISARMED = 4 # safe state
 # pack formats so the radio knows how to handle the binary junk
 TELEM_FMT = "<IIffBB"  # Little-endian: uint32, uint32, float, float, uint8, uint8
 CMD_FMT   = "<IBB"     # Little-endian: uint32, uint8, uint8
-TARGET_FMT = "<Iff"
 
 class V2VBridge: # the main bridge class
     def __init__(self, port, baud=115200, name="Bridge"): # initialize the link
@@ -49,7 +47,6 @@ class V2VBridge: # the main bridge class
         self.latest_telemetry = None # stores last status packet
         self.latest_command = None # stores last instruction packet
         self.latest_msg = None # stores last debug string
-        self.latest_target = None # stores coords for Challenge 3
         self._running = False # worker thread flag
         self._lock = threading.Lock() # thread-safety guard
         self._thread = None # background thread object
@@ -117,9 +114,6 @@ class V2VBridge: # the main bridge class
                         self.latest_command = struct.unpack(CMD_FMT, payload) # unpack into tuple
                     elif f_type == TYPE_MSG: # if debug string
                         self.latest_msg = payload.decode('ascii', errors='ignore') # decode to text
-                    elif f_type == TYPE_TARGET and f_len == struct.calcsize(TARGET_FMT):
-                        self.latest_target = struct.unpack(TARGET_FMT, payload)
-            
 
     #################### API (shouting at the bridge)
 
@@ -164,16 +158,3 @@ class V2VBridge: # the main bridge class
         chk = self._chk_xor(TYPE_MSG, len(payload), payload) # get the checksum
         self.ser.write(bytes([SOF, TYPE_MSG, len(payload)]) + payload + bytes([chk])) # ship it
         self.ser.flush() # force it out now
-    
-    def send_target(self, seq, initial_distance_ft, second_distance_ft):
-        payload = struct.pack(TARGET_FMT, seq, initial_distance_ft, second_distance_ft)
-        chk = self._chk_xor(TYPE_TARGET, len(payload), payload)
-        self.ser.write(bytes([SOF, TYPE_TARGET, len(payload)]) + payload + bytes([chk]))
-        self.ser.flush()
-        
-    def get_target(self, consume=True):
-        with self._lock:
-            val = self.latest_target
-            if consume:
-                self.latest_target = None
-            return val
