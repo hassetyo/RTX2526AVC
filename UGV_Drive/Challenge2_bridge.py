@@ -9,7 +9,7 @@ import v2v_bridge
 # Wait for UAV coordinates, then move there
 # using Challenge 2 style motion:
 #   1) drive straight
-#   2) turn
+#   2) turn using compass/heading feedback
 #   3) drive straight
 # ==========================================
 
@@ -24,10 +24,16 @@ ESP32_BRIDGE_PORT = "/dev/ttyUSB0"
 # Motion tuning
 # ----------------------------
 SPEED_MPH = 0.8
-TURN_ANGLE_DEG = 15.0
-TURN_RATE_DEG_S = 45.0
+TURN_ANGLE_DEG = 75.0
+TURN_RATE_DEG_S = 10.0
+TURN_TOLERANCE_DEG = 5.0
 MOVEMENT_EPS_MPS = 0.05
 TELEM_SEND_HZ = 5
+
+# Slow-compass turn tuning
+HEADING_CHECK_INTERVAL_S = 0.20
+STOP_EARLY_DEG = 8.0
+STABLE_COUNT_REQUIRED = 2
 
 # ----------------------------
 # Unit conversions
@@ -97,38 +103,6 @@ def arm_ugv(vehicle):
     vehicle.mode = VehicleMode("GUIDED")
     if not wait_for_mode(vehicle, "GUIDED"):
         raise RuntimeError(f"Failed to enter GUIDED mode, current mode: {vehicle.mode.name}")
-    if not vehicle.is_armable:
-        print("Warning: vehicle reports not armable; attempting hybrid arm sequence anyway.")
-
-    for label, state in (
-        ("FIRST ARM", True),
-        ("RESET DISARM", False),
-        ("FINAL ARM", True),
-    ):
-        print(f"{label} in mode {vehicle.mode.name}...")
-        vehicle.armed = state
-
-        deadline = time.time() + 3.0
-        while vehicle.armed != state and time.time() < deadline:
-            time.sleep(0.1)
-
-        if vehicle.armed != state:
-            raise RuntimeError(f"Failed to set armed={state}")
-
-        time.sleep(1.0)
-
-    print(f"Switching {vehicle.mode.name} -> GUIDED...")
-    vehicle.mode = VehicleMode("GUIDED")
-
-    deadline = time.time() + 5.0
-    seq = 0
-    while vehicle.mode.name != "GUIDED" and time.time() < deadline:
-        broadcast_status(vehicle, bridge, seq)
-        seq += 1
-        time.sleep(0.1)
-
-    if vehicle.mode.name != "GUIDED":
-        raise RuntimeError(f"Failed to enter GUIDED mode, current mode: {vehicle.mode.name}")
 
 
 def build_velocity_msg(vehicle, speed_mps):
@@ -174,6 +148,23 @@ def send_stop(vehicle):
 
 def get_groundspeed(vehicle):
     return vehicle.groundspeed if vehicle.groundspeed is not None else 0.0
+
+
+def get_heading(vehicle):
+    h = vehicle.heading
+    if h is None:
+        raise RuntimeError("vehicle.heading is unavailable")
+    return float(h)
+
+
+def angle_diff_deg(current_deg, start_deg):
+    """
+    Smallest signed angle from start_deg to current_deg, in degrees.
+    Result is in [-180, 180].
+    Positive = clockwise/right
+    Negative = counterclockwise/left
+    """
+    return ((current_deg - start_deg + 540) % 360) - 180
 
 
 def drive_distance_velocity(vehicle, bridge, distance_m, speed_mps, detection_window_s=1.5):
@@ -279,68 +270,114 @@ def drive_distance(vehicle, bridge, distance_m, speed_mps):
     drive_distance_attitude(vehicle, bridge, distance_m, speed_mps)
 
 
-def turn_left(vehicle, bridge, angle_deg, yaw_rate_deg_s):
+def turn_left(vehicle, bridge, angle_deg, yaw_rate_deg_s, tolerance_deg=5.0):
     if angle_deg <= 0:
         return
 
-    duration_s = abs(angle_deg) / yaw_rate_deg_s
+    start_heading = get_heading(vehicle)
+    target_change = abs(angle_deg)
+    stop_target = target_change - STOP_EARLY_DEG
+
     turn_msg = build_attitude_msg(
         vehicle,
         throttle_fraction=0.0,
         yaw_rate_deg_s=-abs(yaw_rate_deg_s)
     )
 
-    start_t = time.time()
     last_print = 0.0
+    stable_count = 0
     seq = 0
 
-    print(f"TURN LEFT: angle={angle_deg:.1f} deg  rate={yaw_rate_deg_s:.1f} deg/s")
-    while (time.time() - start_t) < duration_s:
-        vehicle.send_mavlink(turn_msg)
+    print(
+        f"TURN LEFT using slow heading updates: "
+        f"start={start_heading:.1f} target=-{target_change:.1f} "
+        f"stop_target=-{stop_target:.1f}"
+    )
 
+    while True:
+        vehicle.send_mavlink(turn_msg)
         broadcast_status(vehicle, bridge, seq)
         seq += 1
 
-        elapsed = time.time() - start_t
-        if elapsed - last_print >= 0.5:
-            print(f"  turning... t={elapsed:3.1f}s")
-            last_print = elapsed
+        time.sleep(HEADING_CHECK_INTERVAL_S)
 
-        time.sleep(0.05)
+        current_heading = get_heading(vehicle)
+        delta = angle_diff_deg(current_heading, start_heading)
+
+        now = time.time()
+        if now - last_print >= 0.2:
+            print(f"  heading={current_heading:.1f} delta={delta:.1f}")
+            last_print = now
+
+        if delta <= -(stop_target - tolerance_deg):
+            stable_count += 1
+        else:
+            stable_count = 0
+
+        if stable_count >= STABLE_COUNT_REQUIRED:
+            break
 
     send_stop(vehicle)
+    time.sleep(0.6)
+
+    final_heading = get_heading(vehicle)
+    final_delta = angle_diff_deg(final_heading, start_heading)
+    print(f"TURN LEFT done: final={final_heading:.1f} delta={final_delta:.1f}")
 
 
-def turn_right(vehicle, bridge, angle_deg, yaw_rate_deg_s):
+def turn_right(vehicle, bridge, angle_deg, yaw_rate_deg_s, tolerance_deg=5.0):
     if angle_deg <= 0:
         return
 
-    duration_s = abs(angle_deg) / yaw_rate_deg_s
+    start_heading = get_heading(vehicle)
+    target_change = abs(angle_deg)
+    stop_target = target_change - STOP_EARLY_DEG
+
     turn_msg = build_attitude_msg(
         vehicle,
         throttle_fraction=0.0,
         yaw_rate_deg_s=abs(yaw_rate_deg_s)
     )
 
-    start_t = time.time()
     last_print = 0.0
+    stable_count = 0
     seq = 0
 
-    print(f"TURN RIGHT: angle={angle_deg:.1f} deg  rate={yaw_rate_deg_s:.1f} deg/s")
-    while (time.time() - start_t) < duration_s:
-        vehicle.send_mavlink(turn_msg)
+    print(
+        f"TURN RIGHT using slow heading updates: "
+        f"start={start_heading:.1f} target=+{target_change:.1f} "
+        f"stop_target=+{stop_target:.1f}"
+    )
 
+    while True:
+        vehicle.send_mavlink(turn_msg)
         broadcast_status(vehicle, bridge, seq)
         seq += 1
 
-        elapsed = time.time() - start_t
-        if elapsed - last_print >= 0.5:
-            print(f"  turning... t={elapsed:3.1f}s")
-            last_print = elapsed
+        time.sleep(HEADING_CHECK_INTERVAL_S)
 
-        time.sleep(0.05)
+        current_heading = get_heading(vehicle)
+        delta = angle_diff_deg(current_heading, start_heading)
+
+        now = time.time()
+        if now - last_print >= 0.2:
+            print(f"  heading={current_heading:.1f} delta={delta:.1f}")
+            last_print = now
+
+        if delta >= (stop_target - tolerance_deg):
+            stable_count += 1
+        else:
+            stable_count = 0
+
+        if stable_count >= STABLE_COUNT_REQUIRED:
+            break
 
     send_stop(vehicle)
+    time.sleep(0.6)
+
+    final_heading = get_heading(vehicle)
+    final_delta = angle_diff_deg(final_heading, start_heading)
+    print(f"TURN RIGHT done: final={final_heading:.1f} delta={final_delta:.1f}")
 
 
 def execute_challenge2_move(vehicle, bridge, x_m, y_m):
@@ -351,7 +388,6 @@ def execute_challenge2_move(vehicle, bridge, x_m, y_m):
     print("Plan: drive |x|, turn toward y, drive |y|")
     print("==========================================")
 
-    # Leg 1: forward/back distance
     first_leg = abs(x_m)
     second_leg = abs(y_m)
 
@@ -364,14 +400,13 @@ def execute_challenge2_move(vehicle, bridge, x_m, y_m):
         drive_distance(vehicle, bridge, first_leg, SPEED_MPS)
         time.sleep(4.0)
 
-    # Turn based on sign of y
     if second_leg > 0:
         if y_m > 0:
-            print("Leg 2 setup: target is to the RIGHT, turning right 90 deg")
-            turn_right(vehicle, bridge, TURN_ANGLE_DEG, TURN_RATE_DEG_S)
+            print("Leg 2 setup: target is to the RIGHT, turning right")
+            turn_right(vehicle, bridge, TURN_ANGLE_DEG, TURN_RATE_DEG_S, TURN_TOLERANCE_DEG)
         elif y_m < 0:
-            print("Leg 2 setup: target is to the LEFT, turning left 90 deg")
-            turn_left(vehicle, bridge, TURN_ANGLE_DEG, TURN_RATE_DEG_S)
+            print("Leg 2 setup: target is to the LEFT, turning left")
+            turn_left(vehicle, bridge, TURN_ANGLE_DEG, TURN_RATE_DEG_S, TURN_TOLERANCE_DEG)
 
         time.sleep(4.0)
 
@@ -407,12 +442,9 @@ def main():
     try:
         print(f"Initial state: armed={vehicle.armed} mode={vehicle.mode.name} armable={vehicle.is_armable}")
 
-        # Run the same initial arming sequence as Challenge 2 first
         arm_ugv(vehicle)
-
         print(f"Post-arm state: armed={vehicle.armed} mode={vehicle.mode.name}")
 
-        # Only connect to the bridge after the Challenge 2 arm sequence finishes
         print(f"Connecting to bridge at {ESP32_BRIDGE_PORT}...")
         bridge = v2v_bridge.V2VBridge(ESP32_BRIDGE_PORT, name="UGV-Bridge")
         bridge.connect()
@@ -456,127 +488,6 @@ def main():
                 bridge.stop()
             except Exception:
                 pass
-
-        vehicle.close()
-    print("==========================================")
-    print("UGV Challenge 2 Ground Station")
-    print("==========================================")
-    print(f"Connecting to UGV at {UGV_CONTROL_PORT}...")
-    print(f"Connecting to bridge at {ESP32_BRIDGE_PORT}...")
-    print(f"Target speed: {SPEED_MPH:.1f} mph ({SPEED_MPS:.4f} m/s)")
-
-    vehicle = connect(UGV_CONTROL_PORT, wait_ready=True, baud=UGV_BAUD_RATE)
-    bridge = v2v_bridge.V2VBridge(ESP32_BRIDGE_PORT, name="UGV-Bridge")
-
-    try:
-        bridge.connect()
-        bridge.send_message("challenge 2 ground station is live . arming now")
-
-        print(f"Initial state: armed={vehicle.armed} mode={vehicle.mode.name} armable={vehicle.is_armable}")
-
-        # --- ARM FIRST, JUST LIKE CHALLENGE 2 ---
-        arm_ugv(vehicle)
-
-        print(f"Post-arm state: armed={vehicle.armed} mode={vehicle.mode.name}")
-        bridge.send_message("challenge 2 ground station armed and awaiting coordinates")
-
-        seq = 0
-
-        while True:
-            broadcast_status(vehicle, bridge, seq)
-            seq += 1
-
-            msg_str = bridge.get_message()
-            if msg_str:
-                print(f"[Ground] Incoming message: {msg_str}")
-
-                try:
-                    coords = parse_goto_message(msg_str)
-                    if coords is not None:
-                        x_m, y_m = coords
-                        execute_challenge2_move(vehicle, bridge, x_m, y_m)
-                        bridge.send_message(f"challenge2_complete:{x_m:.2f},{y_m:.2f}")
-                except Exception as e:
-                    print(f"[Ground] Failed to process message: {e}")
-
-            time.sleep(1.0 / TELEM_SEND_HZ)
-
-    except KeyboardInterrupt:
-        print("Keyboard interrupt received. Shutting down.")
-    finally:
-        try:
-            if vehicle.armed:
-                print("Disarming vehicle...")
-                vehicle.armed = False
-                wait_for_armed(vehicle, False)
-        except Exception:
-            pass
-
-        try:
-            bridge.stop()
-        except Exception:
-            pass
-
-        vehicle.close()
-    print("==========================================")
-    print("UGV Challenge 2 Ground Station")
-    print("==========================================")
-    print(f"Connecting to UGV at {UGV_CONTROL_PORT}...")
-    print(f"Connecting to bridge at {ESP32_BRIDGE_PORT}...")
-    print(f"Target speed: {SPEED_MPH:.1f} mph ({SPEED_MPS:.4f} m/s)")
-
-    vehicle = connect(UGV_CONTROL_PORT, wait_ready=True, baud=UGV_BAUD_RATE)
-    bridge = v2v_bridge.V2VBridge(ESP32_BRIDGE_PORT, name="UGV-Bridge")
-
-    try:
-        bridge.connect()
-        bridge.send_message("challenge 2 ground station is live . awaiting coordinates from uav")
-
-        print(f"Initial state: armed={vehicle.armed} mode={vehicle.mode.name} armable={vehicle.is_armable}")
-
-        seq = 0
-
-        while True:
-            broadcast_status(vehicle, bridge, seq)
-            seq += 1
-
-            msg_str = bridge.get_message()
-            if msg_str:
-                print(f"[Ground] Incoming message: {msg_str}")
-
-                try:
-                    coords = parse_goto_message(msg_str)
-                    if coords is not None:
-                        x_m, y_m = coords
-
-                        if not vehicle.armed:
-                            arm_ugv(vehicle, bridge)
-
-                        execute_challenge2_move(vehicle, bridge, x_m, y_m)
-
-                        bridge.send_message(
-                            f"challenge2_complete:{x_m:.2f},{y_m:.2f}"
-                        )
-                except Exception as e:
-                    print(f"[Ground] Failed to process message: {e}")
-
-            time.sleep(1.0 / TELEM_SEND_HZ)
-
-    except KeyboardInterrupt:
-        print("Keyboard interrupt received. Shutting down.")
-    finally:
-        try:
-            if vehicle.armed:
-                print("Disarming vehicle...")
-                vehicle.armed = False
-                wait_for_armed(vehicle, False)
-        except Exception:
-            pass
-
-        try:
-            bridge.stop()
-        except Exception:
-            pass
 
         vehicle.close()
 
