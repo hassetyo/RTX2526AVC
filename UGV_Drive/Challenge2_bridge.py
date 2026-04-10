@@ -343,7 +343,7 @@ def execute_challenge2_move(vehicle, bridge, x_m, y_m):
     if first_leg > 0:
         print(f"Leg 1: driving forward {first_leg:.3f} m")
         drive_distance(vehicle, bridge, first_leg, SPEED_MPS)
-        time.sleep(1.0)
+        time.sleep(4.0)
 
     # Turn based on sign of y
     if second_leg > 0:
@@ -354,7 +354,7 @@ def execute_challenge2_move(vehicle, bridge, x_m, y_m):
             print("Leg 2 setup: target is to the LEFT, turning left 90 deg")
             turn_left(vehicle, bridge, 90.0, TURN_RATE_DEG_S)
 
-        time.sleep(1.0)
+        time.sleep(4.0)
 
         print(f"Leg 2: driving lateral-equivalent leg {second_leg:.3f} m")
         drive_distance(vehicle, bridge, second_leg, SPEED_MPS)
@@ -375,6 +375,130 @@ def parse_goto_message(msg_str):
 
 
 def main():
+    bridge = None
+
+    print("==========================================")
+    print("UGV Challenge 2 Ground Station")
+    print("==========================================")
+    print(f"Connecting to UGV at {UGV_CONTROL_PORT}...")
+    print(f"Target speed: {SPEED_MPH:.1f} mph ({SPEED_MPS:.4f} m/s)")
+
+    vehicle = connect(UGV_CONTROL_PORT, wait_ready=True, baud=UGV_BAUD_RATE)
+
+    try:
+        print(f"Initial state: armed={vehicle.armed} mode={vehicle.mode.name} armable={vehicle.is_armable}")
+
+        # Run the same initial arming sequence as Challenge 2 first
+        arm_ugv(vehicle)
+
+        print(f"Post-arm state: armed={vehicle.armed} mode={vehicle.mode.name}")
+
+        # Only connect to the bridge after the Challenge 2 arm sequence finishes
+        print(f"Connecting to bridge at {ESP32_BRIDGE_PORT}...")
+        bridge = v2v_bridge.V2VBridge(ESP32_BRIDGE_PORT, name="UGV-Bridge")
+        bridge.connect()
+
+        bridge.send_message("challenge 2 ground station armed and awaiting coordinates")
+
+        seq = 0
+
+        while True:
+            broadcast_status(vehicle, bridge, seq)
+            seq += 1
+
+            msg_str = bridge.get_message()
+            if msg_str:
+                print(f"[Ground] Incoming message: {msg_str}")
+
+                try:
+                    coords = parse_goto_message(msg_str)
+                    if coords is not None:
+                        x_m, y_m = coords
+                        execute_challenge2_move(vehicle, bridge, x_m, y_m)
+                        bridge.send_message(f"challenge2_complete:{x_m:.2f},{y_m:.2f}")
+                except Exception as e:
+                    print(f"[Ground] Failed to process message: {e}")
+
+            time.sleep(1.0 / TELEM_SEND_HZ)
+
+    except KeyboardInterrupt:
+        print("Keyboard interrupt received. Shutting down.")
+    finally:
+        try:
+            if vehicle.armed:
+                print("Disarming vehicle...")
+                vehicle.armed = False
+                wait_for_armed(vehicle, False)
+        except Exception:
+            pass
+
+        if bridge is not None:
+            try:
+                bridge.stop()
+            except Exception:
+                pass
+
+        vehicle.close()
+    print("==========================================")
+    print("UGV Challenge 2 Ground Station")
+    print("==========================================")
+    print(f"Connecting to UGV at {UGV_CONTROL_PORT}...")
+    print(f"Connecting to bridge at {ESP32_BRIDGE_PORT}...")
+    print(f"Target speed: {SPEED_MPH:.1f} mph ({SPEED_MPS:.4f} m/s)")
+
+    vehicle = connect(UGV_CONTROL_PORT, wait_ready=True, baud=UGV_BAUD_RATE)
+    bridge = v2v_bridge.V2VBridge(ESP32_BRIDGE_PORT, name="UGV-Bridge")
+
+    try:
+        bridge.connect()
+        bridge.send_message("challenge 2 ground station is live . arming now")
+
+        print(f"Initial state: armed={vehicle.armed} mode={vehicle.mode.name} armable={vehicle.is_armable}")
+
+        # --- ARM FIRST, JUST LIKE CHALLENGE 2 ---
+        arm_ugv(vehicle)
+
+        print(f"Post-arm state: armed={vehicle.armed} mode={vehicle.mode.name}")
+        bridge.send_message("challenge 2 ground station armed and awaiting coordinates")
+
+        seq = 0
+
+        while True:
+            broadcast_status(vehicle, bridge, seq)
+            seq += 1
+
+            msg_str = bridge.get_message()
+            if msg_str:
+                print(f"[Ground] Incoming message: {msg_str}")
+
+                try:
+                    coords = parse_goto_message(msg_str)
+                    if coords is not None:
+                        x_m, y_m = coords
+                        execute_challenge2_move(vehicle, bridge, x_m, y_m)
+                        bridge.send_message(f"challenge2_complete:{x_m:.2f},{y_m:.2f}")
+                except Exception as e:
+                    print(f"[Ground] Failed to process message: {e}")
+
+            time.sleep(1.0 / TELEM_SEND_HZ)
+
+    except KeyboardInterrupt:
+        print("Keyboard interrupt received. Shutting down.")
+    finally:
+        try:
+            if vehicle.armed:
+                print("Disarming vehicle...")
+                vehicle.armed = False
+                wait_for_armed(vehicle, False)
+        except Exception:
+            pass
+
+        try:
+            bridge.stop()
+        except Exception:
+            pass
+
+        vehicle.close()
     print("==========================================")
     print("UGV Challenge 2 Ground Station")
     print("==========================================")
