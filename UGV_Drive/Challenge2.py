@@ -9,9 +9,9 @@ UGV_BAUD_RATE = 115200
 
 # Mission parameters
 SPEED_MPH = 0.8
-INITIAL_DISTANCE_FT = 10.0     # first leg
-SECOND_DISTANCE_FT = 5.0       # second leg
-TURN_ANGLE_DEG = 90.0
+INITIAL_DISTANCE_FT = 8.0     # first leg
+SECOND_DISTANCE_FT = 8.0       # second leg
+TURN_ANGLE_DEG = 75.0
 TURN_RATE_DEG_S = 10.0
 TURN_TOLERANCE_DEG = 5.0
 
@@ -347,7 +347,7 @@ def main():
         arm_ugv(vehicle)
 
         print("UGV armed in GUIDED mode. Starting move...")
-        drive_distance(vehicle, INITIAL_DISTANCE_M, SPEED_MPS)
+        #drive_distance(vehicle, INITIAL_DISTANCE_M, SPEED_MPS)
         time.sleep(1.0)
         turn_left(
             vehicle,
@@ -357,7 +357,7 @@ def main():
             tolerance_deg=TURN_TOLERANCE_DEG
         )
         time.sleep(4.0)
-        drive_distance(vehicle, SECOND_DISTANCE_M, SPEED_MPS)
+        #drive_distance(vehicle, SECOND_DISTANCE_M, SPEED_MPS)
 
         print("Move complete. Disarming...")
         vehicle.armed = False
