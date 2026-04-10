@@ -2,7 +2,7 @@ from pymavlink import mavutil  # using the confirmed mavlink pattern instead of 
 import time  # for timing and sleeps
 import math  # for simple comparisons
 
-# uav simple altitude mission - arm + climb + hover + move + land
+# uav simple altitude mission - arm + climb + hover + land
 # keeps the overall style close to mission 4 but removes rover/radio pieces
 # uses stabilize for liftoff, alt hold for hover, and land for a gentle touchdown
 
@@ -19,14 +19,12 @@ CLIMB_LOOP_DT = 0.10      # climb loop speed
 HOVER_LOOP_DT = 0.10      # hover loop speed
 LAND_LOOP_DT = 0.25       # landing print loop speed
 LAND_TIMEOUT_S = 60.0     # safety timeout for landing
-MOVEMENT_SPEED = 40       # used to control the speed of movements, too high will cause the drone to tilt too much and fall
 
 # throttle settings i tuned
 THROTTLE_MIN = 1000       # motors off / minimum throttle
 THROTTLE_IDLE = 1150      # props spinning but no real lift
 THROTTLE_CLIMB = 1650     # enough lift to climb
 THROTTLE_HOVER = 1500     # mid-stick hover command for alt hold
-
 
 # logging
 LOG_FILE = "alt_hold_hover_land_log.txt"
@@ -87,7 +85,7 @@ def change_mode(master, *mode_names):  # changes the flight controller mode with
             time.sleep(1)
             return mode
     raise RuntimeError(f"None of these modes were found: {mode_names}. Available: {list(mapping.keys())}")
-
+    
 
 def arm_drone(master):  # engages the motors
     master.mav.command_long_send(
@@ -98,7 +96,7 @@ def arm_drone(master):  # engages the motors
         1, 0, 0, 0, 0, 0, 0,
     )
     log_event("Arming motors...")
-
+    time.sleep(2)  # wait for the motors to spin up
 
 def disarm_drone(master):  # emergency fallback if needed
     master.mav.command_long_send(
@@ -110,21 +108,12 @@ def disarm_drone(master):  # emergency fallback if needed
     )
     log_event("Disarm command sent.")
 
-
 def set_throttle(master, pwm):  # pushes throttle by rc override
     master.mav.rc_channels_override_send(
         master.target_system,
         master.target_component,
         0, 0, pwm, 0, 0, 0, 0, 0,
     )
-
-def set_rc_override(master, x = THROTTLE_HOVER,y = THROTTLE_HOVER,z = THROTTLE_HOVER):
-    master.mav.rc_channels_override_send(
-        master.target_system,
-        master.target_component,
-        x, y, z, 0, 0, 0, 0, 0,
-    )
-
 
 def clear_rc_override(master):  # releases rc override back to the autopilot / radio
     master.mav.rc_channels_override_send(
@@ -244,70 +233,44 @@ def hover_in_alt_hold(master, hover_time_s):  # switches to alt hold and keeps t
     print()
     log_event("Hover segment complete.")
 
-MOVEMENT_SPEED = 40
-def move_pitch(master, forward = True, seconds = 1.5):
-    move_pwm = 1500
-    brake_pwm = 1500
 
-    if(forward):
-        direction = "forward"
-        move_pwm -= MOVEMENT_SPEED
-        brake_pwm += MOVEMENT_SPEED
-    else:
-        direction = "backwards"
-        move_pwm += MOVEMENT_SPEED
-        brake_pwm -= MOVEMENT_SPEED
-        
-    # 1. Tilt Forward
-    log_event(f"Moving {direction}...")
-    start_t = time.time()
-    while (time.time() - start_t) < seconds:
-        set_rc_override(master, pitch=move_pwm, throttle=THROTTLE_HOVER)
-        time.sleep(0.1)
-
-    # 2. Level Out
-    log_event("Leveling... (Coasting)")
-    set_rc_override(master, pitch=1500, throttle=THROTTLE_HOVER)
-    time.sleep(1.0) # Drone is still moving forward here!
-
-    # 3. Active Brake (Counter-Pitch)
-    log_event("Applying brakes...")
-    start_t = time.time()
-    while (time.time() - start_t) < 0.4:
-        set_rc_override(master, pitch=brake_pwm, throttle=THROTTLE_HOVER)
-        time.sleep(0.1)
-
-    # 4. Final Neutral
-    set_rc_override(master, pitch=1500, throttle=THROTTLE_HOVER)
-    log_event("Hovering at destination.")
-
-def land_safely(master, timeout=10):  # lets land mode do a controlled descent and auto-disarm
-    """
-    Sends a command for the drone to land.
-
-    Args:
-        master (mavutil.mavlink_connection): The MAVLink connection to use.
-        timeout (int): Time in seconds to wait for an acknowledgment.
-
-    Returns:
-        int: mavutil.mavlink.MAV_RESULT enum value.
-    """
-
-    # Send a command to land
-    master.mav.command_long_send(
-        master.target_system, 
-        master.target_component,
-        mavutil.mavlink.MAV_CMD_NAV_LAND, 
-        0, 0, 0, 0, 0, 0, 0, 0
+def land(the_connection, timeout=10):  # sends MAV_CMD_NAV_LAND, then monitors until confirmed on the ground
+    the_connection.mav.command_long_send(
+        the_connection.target_system,
+        the_connection.target_component,
+        mavutil.mavlink.MAV_CMD_NAV_LAND,
+        0, 0, 0, 0, 0, 0, 0, 0,
     )
-
-    # Wait for the acknowledgment
-    ack = master.recv_match(type='COMMAND_ACK', blocking=True, timeout=timeout)
+    ack = the_connection.recv_match(type="COMMAND_ACK", blocking=True, timeout=timeout)
     if ack is None:
-        print('No acknowledgment received within the timeout period.')
+        log_event("No acknowledgment received within the timeout period.")
         return None
 
-    return ack.result
+    log_event("Land command acknowledged. Monitoring descent...")
+    clear_rc_override(the_connection)
+
+    deadline = time.time() + LAND_TIMEOUT_S
+    confirmed_low = False  # only true once altitude has actually reached the ground threshold
+
+    while time.time() < deadline:
+        alt = print_altitude(the_connection, prefix="Land Alt")
+
+        # mark that we have physically reached ground level
+        if alt is not None and alt <= 0.08:
+            confirmed_low = True
+
+        # only accept a disarm as a real touchdown if we already saw near-zero altitude
+        if confirmed_low and not the_connection.motors_armed():
+            print()
+            log_event("Touchdown confirmed. Motors stopped.")
+            return ack.result
+
+        time.sleep(LAND_LOOP_DT)
+
+    raise RuntimeError("Landing timed out before touchdown confirmation.")
+
+
+
 
 #################### the main mission logic
 
@@ -316,7 +279,7 @@ def main():  # the main boss function
         f.write("")
 
     log_event("==========================================")
-    log_event("   UAV MOVEMENT TEST + SAFE LAND MISSION")
+    log_event("   UAV ALT HOLD HOVER + SAFE LAND MISSION")
     log_event("==========================================")
 
     log_event(f"Connecting to Drone: {CONNECTION_STRING}...")
@@ -331,7 +294,7 @@ def main():  # the main boss function
     request_message_streams(master)
 
     try:
-        wait_for_good_altitude(master)
+        #wait_for_good_altitude(master)
 
         # step 1: start in stabilize like your mission 4 pattern
         change_mode(master, "STABILIZE")
@@ -343,20 +306,14 @@ def main():  # the main boss function
         # step 3: maintain altitude using alt hold
         hover_in_alt_hold(master, HOVER_TIME_S)
 
-        #step 4: move forward a few feet
-        move_pitch(master, True, 1.0)
-
-        #step 5: move backward a few feet
-        move_pitch(master, False, 1.0)
-
-        # step 5: safely and slowly land
-        land_safely(master)
+        # step 4: land
+        land(master)
 
     except KeyboardInterrupt:
         print()
         log_event("[!] Keyboard interrupt received. Switching to LAND now...")
         try:
-            land_safely(master)
+            land(master)
         except Exception as land_err:
             log_event(f"Landing fallback error: {land_err}")
             try:
