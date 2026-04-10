@@ -1,74 +1,72 @@
 import time
-from v2v_bridge import (
-    V2VBridge,
-    CMD_MOVE_FORWARD,
-    CMD_STOP,
-)
+import v2v_bridge
 
-# =========================
-# UAV SIDE CONFIG
-# =========================
-RADIO_PORT = "/dev/ttyUSB0"   # change if your radio is on a different port
-BAUD_RATE = 115200
+# UAV-SIDE COMMAND SCRIPT
+# Sends commands to the UGV through the V2V bridge.
+# Mission:
+#   1) move forward 8 ft
+#   2) stop
+#   3) turn left 90 degrees
+#   4) disarm
+#
+# This uses the existing command set from v2v_bridge.py.
+# Since the current bridge protocol already has a 2 ft move command,
+# we send that 4 times to get 8 ft total.
 
-WAIT_FOR_RESPONSE_SECONDS = 10.0
+UAV_BRIDGE_PORT = "/dev/ttyUSB0"   # update if your UAV-side ESP32 is on another port
+COMMAND_DELAY = 1.2                 # delay between 2 ft movement commands
+TURN_DELAY = 2.5                    # delay for the 90-degree turn to finish
+FINAL_DELAY = 1.0                   # small pause before disarm
+
+
+def send_cmd(bridge, seq, cmd, label, estop=0):
+    extra = " | ESTOP=1" if estop else ""
+    print(f"[UAV] Sending command {seq}: {label}{extra}")
+    bridge.send_command(seq, cmd, estop)
 
 
 def main():
-    print("=============================================")
-    print("UAV Challenge 1: Tell UGV to Move 10 Feet")
-    print("=============================================")
-    print(f"Connecting to radio on {RADIO_PORT} at {BAUD_RATE}...")
-
-    bridge = V2VBridge(RADIO_PORT, BAUD_RATE, name="UAV")
+    bridge = v2v_bridge.V2VBridge(UAV_BRIDGE_PORT, name="UAV-Bridge")
 
     try:
         bridge.connect()
-        time.sleep(2.0)
+        time.sleep(1.0)
+        bridge.send_message("uav online - sending 8ft left-turn mission")
 
-        cmd_seq = 1
-        estop = 0
+        seq = 1
 
-        print("Sending CMD_MOVE_FORWARD to UGV...")
-        bridge.send_command(cmd_seq, CMD_MOVE_FORWARD, estop)
-        print("Command sent.")
+        # Move forward 8 ft total = 4 x 2 ft
+        for step in range(4):
+            send_cmd(bridge, seq, v2v_bridge.CMD_MOVE_2FT, f"MOVE_2FT ({step + 1}/4)")
+            seq += 1
+            time.sleep(COMMAND_DELAY)
 
-        print("Waiting for UGV responses...")
-        start = time.time()
+        # Explicit stop after the forward motion
+        send_cmd(bridge, seq, v2v_bridge.CMD_STOP, "STOP")
+        seq += 1
+        time.sleep(1.0)
 
-        while (time.time() - start) < WAIT_FOR_RESPONSE_SECONDS:
-            msg = bridge.get_message()
-            if msg:
-                print(f"[UGV MSG] {msg}")
+        # Turn left 90 degrees
+        send_cmd(bridge, seq, v2v_bridge.CMD_TURN_LEFT, "TURN_LEFT_90")
+        seq += 1
+        time.sleep(TURN_DELAY)
 
-            telem = bridge.get_telemetry()
-            if telem:
-                seq, t_ms, vx, vy, marker, estop_flag = telem
-                print(
-                    f"[UGV TELEM] seq={seq} "
-                    f"t_ms={t_ms} "
-                    f"vx={vx:.3f} "
-                    f"vy={vy:.3f} "
-                    f"marker={marker} "
-                    f"estop={estop_flag}"
-                )
+        # Final stop for safety
+        send_cmd(bridge, seq, v2v_bridge.CMD_STOP, "STOP_AFTER_TURN")
+        seq += 1
+        time.sleep(FINAL_DELAY)
 
-            time.sleep(0.25)
-
-        print("Done waiting for response.")
+        print("[UAV] Mission commands sent.")
 
     except KeyboardInterrupt:
-        print("\nKeyboardInterrupt received. Sending STOP...")
+        print("[UAV] Interrupted by user.")
+    except Exception as e:
+        print(f"[UAV] Error: {e}")
+    finally:
         try:
-            bridge.send_command(999, CMD_STOP, 1)
-            time.sleep(0.5)
+            bridge.stop()
         except Exception:
             pass
-
-    finally:
-        print("Stopping bridge...")
-        bridge.stop()
-        print("Done.")
 
 
 if __name__ == "__main__":
