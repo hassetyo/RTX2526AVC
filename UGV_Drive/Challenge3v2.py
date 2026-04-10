@@ -404,13 +404,8 @@ def avoid_obstacle(vehicle, lidar_ser, green, red, depth=0):
     green.off()
     red.on()
 
-<<<<<<< HEAD
     turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
                green, red, flashing=True)
-=======
-    # 1) Turn away from obstacle
-    turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S, green, red, flashing=True)
->>>>>>> fa51d9253332fa4ece1882300f815b2f977e1b94
     time.sleep(4.0)
 
     drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M, SPEED_MPS,
@@ -418,7 +413,6 @@ def avoid_obstacle(vehicle, lidar_ser, green, red, depth=0):
                   flashing=True, label="AVOID RIGHT")
     time.sleep(4.0)
 
-<<<<<<< HEAD
     turn_right(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
               green, red, flashing=True)
     time.sleep(4.0)
@@ -426,19 +420,12 @@ def avoid_obstacle(vehicle, lidar_ser, green, red, depth=0):
     drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M + 1, SPEED_MPS,
                   green, red, obstacle_threshold_m=None,
                   flashing=True, label="BYPASS FORWARD")
-=======
-    time.sleep(4.0)
-
-    # 3) Re-orient parallel to original path
-    turn_right(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S, green, red, flashing=True)
->>>>>>> fa51d9253332fa4ece1882300f815b2f977e1b94
     time.sleep(4.0)
 
     turn_right(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
               green, red, flashing=True)
     time.sleep(4.0)
 
-<<<<<<< HEAD
     drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M, SPEED_MPS,
                   green, red, obstacle_threshold_m=None,
                   flashing=True, label="RETURN LEFT")
@@ -446,31 +433,6 @@ def avoid_obstacle(vehicle, lidar_ser, green, red, depth=0):
 
     turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
                green, red, flashing=True)
-=======
-    time.sleep(4.0)
-
-    # 5) Turn back toward original line
-    turn_right(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S, green, red, flashing=True)
-    time.sleep(4.0)
-
-    # 6) Return sideways toward original path line
-    result = drive_forward(
-        vehicle, lidar_ser,
-        AVOIDANCE_DISTANCE_M, SPEED_MPS,
-        green, red,
-        obstacle_threshold_m=OBSTACLE_THRESHOLD_M,
-        flashing=True,
-        label="RETURN SIDE-STEP 2",
-    )
-    if result["obstacle_hit"]:
-        print("Obstacle detected during return side-step 2. Re-running avoidance.")
-        return avoid_obstacle(vehicle, lidar_ser, green, red, depth + 1)
-
-    time.sleep(4.0)
-
-    # 7) Restore original heading
-    turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S, green, red, flashing=True)
->>>>>>> fa51d9253332fa4ece1882300f815b2f977e1b94
     time.sleep(4.0)
 
     print(
