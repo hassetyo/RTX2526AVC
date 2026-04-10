@@ -1,166 +1,309 @@
-import serial # i had to pull in the usb serial driver so it can actually talk
-import struct # pulled in the binary packing and unpacking tools cause python is annoying
-import threading # lets me hire background workers to do the reading
-import time # pulls in the clock functions so i can sleep
+from dronekit import connect, VehicleMode # library to bully the pixhawk
+import time # for clocking things
+import math # for doing circles and turns
+import v2v_bridge # our custom translator for the radio boxes
+from pymavlink import mavutil # raw mavlink pulses for the speed commands
 
-# V2V BRIDGE LIBRARY
-# this is the translator i built for the jetson and the rpi
-# it makes python talk the exact same binary grammar as the esp32 radio boxes i made
+# UGV GROUND STATION SCRIPT
+# This runs on the Raspberry Pi and bullies the Pixhawk into moving
+# based on what the Jetson/Drone says over the radio
 
-################################# config stuff i setup
-# constants for the binary headers that must match the esp32 code exactly or it breaks
-SOF = 0xAA         # start of packet marker basically the wait for it byte
-TYPE_TELEM = 1     # status and telemetry stuff like uav stats
-TYPE_CMD = 2       # missions and instructions for bossing the ugv around
-TYPE_MSG = 3       # raw crap talking strings i use for debugging
+############## config stuff
+# where the hardware is plugged in
+UGV_CONTROL_PORT = "/dev/ttyACM0"   # The Pixhawk/Cube connection
+ESP32_BRIDGE_PORT = "/dev/ttyUSB0"  # The ESP32 talking to the drone
 
-# command codes i made for the ugv mission engine
-CMD_ARM          = 1  # wake up the scary motors
-CMD_DISARM       = 2  # put the motors to sleep before they chop my fingers
-CMD_TAKEOFF      = 3  # drone specific takeoff command
-CMD_LAND         = 4  # drone specific land command
-CMD_MOVE_FORWARD = 5  # drive 10ft forward
-CMD_MOVE_2FT     = 6  # drive 2ft forward
-CMD_TURN_RIGHT   = 7  # pivot right 90 degrees
-CMD_TURN_LEFT    = 8  # pivot left 90 degrees
-CMD_CIRCLE       = 9  # double circle stunt i added
-CMD_MISSION_1    = 10 # trigger the competition mission 1
-CMD_MISSION_2    = 11 # trigger the competition mission 2
-CMD_MISSION_3    = 12 # trigger the competition mission 3
-CMD_STOP         = 13 # kill all movement immediately so it doesnt crash
+# drive settings
+DIST_M = 3.048       # 10ft default distance
+SPEED_MPS = 1.5      # m/s target speed
+TELEM_SEND_HZ = 5    # status update rate
 
-# mode identifiers i ripped for the pixhawk
-MODE_INITIAL  = 0 # just turned on and stupid
-MODE_GUIDED   = 1 # taking our code commands
-MODE_AUTO     = 2 # running a preplanned flight
-MODE_LAND     = 3 # coming home to land
-MODE_DISARMED = 4 # safe state finally
+# start the connection to the wheel ugv
+print("==========================================") # header
+print("   UGV GROUND STATION - MISSION READY") # title
+print("==========================================") # footer
+print(f"[Ground] Connecting to UGV at {UGV_CONTROL_PORT}...") # log start
 
-# pack formats i wrote so the radio knows how to handle the binary junk
-TELEM_FMT = "<IIffBB"  # little endian packing uint32 uint32 float float uint8 uint8
-CMD_FMT   = "<IBB"     # little endian packing uint32 uint8 uint8
+try: # try to connect without dying
+    vehicle = connect(UGV_CONTROL_PORT, wait_ready=True, baud=115200) # open link
+    print(f"[Ground] Connected! Ready to sync.") # success
+except Exception as e: # if it fail
+    print(f"!!! Error connecting to UGV: {e} !!!") # log error
+    exit() # give up
 
-class V2VBridge: # the main bridge class i wrote
-    def __init__(self, port, baud=115200, name="Bridge"): # initialize the serial link
-        self.port = port # save the usb port name here
-        self.baud = baud # save the baud rate speed i picked
-        self.name = name # save the display name just for logs
-        self.ser = None # i havent actually opened the serial port yet
-        
-        # trash cans i made for the latest data we catch from the air
-        self.latest_telemetry = None # stores the very last status packet
-        self.latest_command = None # stores the very last instruction packet
-        self.latest_msg = None # stores the very last debug string
-        self._running = False # worker thread flag to see if he is alive
-        self._lock = threading.Lock() # thread safety guard lock i had to add
-        self._thread = None # empty background thread object
+######################### avoidance brain
 
-    def connect(self): # kicks off the actual physical link
-        # kicks off the serial port and starts a background thread so we dont drop packets
-        print(f"[{self.name}] Connecting to {self.port} at {self.baud}...") # log that we are trying
-        self.ser = serial.Serial(self.port, self.baud, timeout=0.01) # officially open the usb wire
-        self._running = True # set running flag to true so the loop starts
-        self._thread = threading.Thread(target=self._read_loop, daemon=True) # define the background worker
-        self._thread.start() # actually launch the worker thread into the void
-        print(f"[{self.name}] Bridge Thread Running... Listening for the radio.") # log massive success
+class ObstacleDetector: # interface for the LUXONIS OAK-D-Lite
+    def __init__(self): # setup logic
+        # would init the depthai pipeline here
+        self.safe_distance_m = 1.0 # 5ft radius requirement (approx 1.5m, using 1m for tight)
+        pass # placeholder
 
-    def stop(self): # shuts down the link safely
-        # i had to make it kill the thread and close the port cleanly
-        self._running = False # tell the worker to please stop
-        if self._thread: # if the thread actually exists
-            self._thread.join(timeout=1.0) # wait a second for it to die
-        if self.ser: # if the serial port is still open
-            self.ser.close() # slam the hardware link closed
+    def check_for_buckets(self): # scanning loop
+        # sweeps the depth cam for boxes or buckets
+        # returns (found, angle_to_obj, distance)
+        return False, 0, 0 # placeholder for actual cam feed logic
 
-    ############################ helper logic i wrote
+def log_avoidance(text): # official competition mission 3 logs
+    timestamp = time.strftime("%H:%M:%S") # get clock
+    with open("ugv_mission3_avoidance.txt", "a") as f: # open file
+        f.write(f"[{timestamp}] [AVOIDANCE] {text}\n") # write line
+    print(f"[{timestamp}] [AVOIDANCE] {text}") # show console
 
-    # i had to add this cause i needed a way to seal them so i know they werent tampered with
-    # im using XOR checksum math to prove the data is totally clean
-    def _chk_xor(self, type_b, len_b, payload: bytes) -> int: # the checksum math tool
-        c = (type_b ^ len_b) & 0xFF # seed it with the type and length
-        for b in payload: # loop through every single byte in the meat
-            c ^= b # flip the bits against the seed
-        return c & 0xFF # spit out the 8 bit result
+#########################status Logic
 
-    #################### the brain that listens to usb
-
+def broadcast_status(bridge, seq): # yells status back to drone
+    # grabs status from the pixhawk and yells it back to the drone
+    armed_val = 1 if vehicle.armed else 0 # check motor state
+    m = vehicle.mode.name # get current mode string
+    mode_idx = v2v_bridge.MODE_INITIAL # default
     
+    # mapping mode names to numbers
+    if m == "GUIDED": mode_idx = v2v_bridge.MODE_GUIDED # guided bits
+    elif m == "AUTO": mode_idx = v2v_bridge.MODE_AUTO # auto bits
+    elif m == "LAND": mode_idx = v2v_bridge.MODE_LAND # land bits
+    
+    # pack GPS and safety flags into a single byte
+    armable_bit = 0x10 if vehicle.is_armable else 0x00 # can we arm
+    gps_bit = 0x20 if (vehicle.gps_0.fix_type > 0) else 0x00 # do we have gps
+    safety_byte = (mode_idx & 0x0F) | armable_bit | gps_bit # merge bits
+    
+    # current time and ground speed
+    t_ms = int(time.time() * 1000) & 0xFFFFFFFF # time in ms
+    v_mps = vehicle.groundspeed if vehicle.groundspeed is not None else 0.0 # groundspeed
+    
+    # shove status down the USB wire to the bridge
+    bridge.send_telemetry(seq, t_ms, v_mps, 0.0, armed_val, safety_byte) # bridge pulse
 
-    def _read_loop(self): # the infinite background worker loop i made
-        # this guy just sits in the background and looks for the 0xAA header in the serial stream
-        while self._running: # while we literally havent stopped him
-            if self.ser.in_waiting == 0: # if absolutely no bytes are on the wire
-                time.sleep(0.001) # relax the poor cpu for 1ms
-                continue # loop back to the top
-                
-            # look for the starting 0xAA byte i picked
-            b = self.ser.read(1) # yank one byte off the wire
-            if not b or b[0] != SOF: # check if it is our magic 0xAA start byte
-                continue # just ignore it if it is static
-            
-            # grab what type it is and exactly how long
-            hdr = self.ser.read(2) # read the type and length bytes
-            if len(hdr) < 2: continue # abort if we didnt get enough bytes
-            f_type, f_len = hdr[0], hdr[1] # extract the type and size
+def arm_and_sync(bridge): # forces motor engagement
+    # forces the UGV to arm even if its being a pissrat about GPS
+    print("\n[Ground] >>> INITIATING HYBRID ARM SEQUENCE") # log start
+    if not vehicle.is_armable: # if safety checks fail
+        print(f"!!! [WARNING] PRE-ARM CHECKS FAILED (GPS: {vehicle.gps_0.fix_type}) !!!") # log fail
+    
+    # aggressive arm-disarm-arm sequence to wake up the Pixhawk
+    for attempt in ["FIRST ARM", "RESET DISARM", "FINAL ARM"]: # 3 steps
+        state = True if "ARM" in attempt else False # figure out target
+        print(f"  [FORCE-SYNC] Initiating {attempt} in {vehicle.mode.name} mode...") # log attempt
+        for retry in range(3): # try 3 times
+            vehicle.armed = state # tell pixhawk
+            timeout = time.time() + 3 # set timeout
+            while vehicle.armed != state: # wait for it
+                if time.time() > timeout: break # stop waiting
+                broadcast_status(bridge, 0) # keep drone updated
+                time.sleep(0.1) # wait
+            if vehicle.armed == state: break # stop retries if successful
+        time.sleep(1.0) # let settle
 
-            # pull the actual data payload meat
-            payload = self.ser.read(f_len) # read the actual message chunk
-            if len(payload) < f_len: continue # abort if the data got cut off
+    if not vehicle.armed: return # stop if failed
 
-            # check the signature byte at the end
-            chk_byte = self.ser.read(1) # read the final checksum fingerprint
-            if not chk_byte: continue # abort if there is no checksum found
-            
-            # if the signature actually matches i save it in the global state
-            if chk_byte[0] == self._chk_xor(f_type, f_len, payload): # verify the seal with math
-                with self._lock: # lock the state variables so workers dont fight
-                    if f_type == TYPE_TELEM and f_len == struct.calcsize(TELEM_FMT): # if it is a status
-                        self.latest_telemetry = struct.unpack(TELEM_FMT, payload) # unpack the binary into a tuple
-                    elif f_type == TYPE_CMD and f_len == struct.calcsize(CMD_FMT): # if it is a command
-                        self.latest_command = struct.unpack(CMD_FMT, payload) # unpack it into a tuple
-                    elif f_type == TYPE_MSG: # if it is just a debug string
-                        self.latest_msg = payload.decode('ascii', errors='ignore') # decode the binary text to ascii
+    # switch to GUIDED mode so it takes radio commands
+    print(f"  [MODE] Switching {vehicle.mode.name} -> GUIDED...") # log mode shift
+    vehicle.mode = VehicleMode("GUIDED") # tell pixhawk
+    m_timeout = time.time() + 5 # set timeout
+    while vehicle.mode.name != "GUIDED" and time.time() < m_timeout: # wait for shift
+        broadcast_status(bridge, 0) # keep drone updated
+        time.sleep(0.1) # wait
+    
+    print("!!! UGV FULLY ARMED AND SYNCED !!!\n") # success
 
-    #################### API for shouting at the bridge
+#######execution Engine (The "Slave")
 
-    def get_telemetry(self): # the getter i wrote for the latest status
-        # grabs the very latest status packet we managed to find
-        with self._lock: # thread safe access lock
-            return self.latest_telemetry # spit the value out
+def execute_drive(bridge, distance_m): # moves ugv for a set distance
+    # sends a pulsed MAVLink message to drive forward
+    print(f"[Ground] DRIVE: {distance_m}m at {SPEED_MPS}m/s") # log drive
+    msg = vehicle.message_factory.set_position_target_local_ned_encode( # build pulse
+        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0b0000111111000111, # local mode
+        0, 0, 0, SPEED_MPS, 0, 0, 0, 0, 0, 0, 0) # speed vectors
+    
+    start_t = time.time() # start clock
+    duration = distance_m / SPEED_MPS # calc time
+    while (time.time() - start_t) < duration: # loop for duration
+        vehicle.send_mavlink(msg) # blast mavlink pulse
+        broadcast_status(bridge, 0) # keep drone happy
+        time.sleep(0.1) # 10hz
+    
+    # full stop
+    stop_msg = vehicle.message_factory.set_position_target_local_ned_encode( # build stop
+        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0b0000111111000111, # local mode
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) # zero speed
+    vehicle.send_mavlink(stop_msg) # blast stop
+    time.sleep(0.5) # let settle
 
-    def get_command(self, consume=True): # the getter for the latest command
-        # grabs a command and immediately clears it so we dont repeat it like an idiot
-        with self._lock: # thread safe access again
-            val = self.latest_command # save the value temporary
-            if consume: # if we actually want to delete it after reading
-                self.latest_command = None # wipe it clean
-            return val # spit out the saved value
+def execute_turn(bridge, angle_deg): # spins in place
+    # spins the ugv in place to a specific relative angle
+    print(f"[Ground] >>> EXECUTING TURN {angle_deg} DEGREES") # log turn
+    target_yaw = angle_deg # target
+    yaw_rate = 60 # deg/s speed of pivot
+    direction = 1 if angle_deg > 0 else -1 # 1 = right, -1 = left
+    
+    msg = vehicle.message_factory.set_position_target_local_ned_encode( # build pivot pulse
+        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0b0000101111111111, # yaw rate mode
+        0, 0, 0, 0, 0, 0, 0, 0, 0, math.radians(yaw_rate * direction), 0) # yaw speed
+    
+    duration = abs(angle_deg) / yaw_rate # calc time
+    start_t = time.time() # start clock
+    while (time.time() - start_t) < duration: # loop
+        vehicle.send_mavlink(msg) # blast mavlink
+        broadcast_status(bridge, 0) # update drone
+        time.sleep(0.1) # 10hz
+    
+    # send a stop message at the end
+    stop_msg = vehicle.message_factory.set_position_target_local_ned_encode( # build stop
+        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0b0000111111111111, # zero everything
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) # zeros
+    vehicle.send_mavlink(stop_msg) # blast stop
+    time.sleep(1.0) # let it settle
 
-    def get_message(self, consume=True): # getter for the latest string
-        # pulls out a raw string message like the hello ones
-        with self._lock: # lock it up
-            val = self.latest_msg # save the value
-            if consume: # if we want to consume and delete
-                self.latest_msg = None # clear it out
-            return val # spit it out
+def execute_drive_forever(bridge, speed_mps): # constant drive
+    # drives straight at a constant speed until CMD_STOP is received
+    print(f"[Ground] >>> MISSION 1: DRIVING STRAIGHT AT {speed_mps} m/s") # log mission
+    msg = vehicle.message_factory.set_position_target_local_ned_encode( # build msg
+        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0b0000111111000111, # local mode
+        0, 0, 0, speed_mps, 0, 0, 0, 0, 0, 0, 0) # speed
+    
+    # this will keep looping in the main script now
+    return msg # return msg to main loop
 
-    def send_telemetry(self, seq, t_ms, vx, vy, marker, estop): # the sender for status stuff
-        # packages up the status into binary and literally shoves it down the usb wire
-        payload = struct.pack(TELEM_FMT, seq, t_ms, vx, vy, marker, estop) # pack all the variables to binary
-        chk = self._chk_xor(TYPE_TELEM, len(payload), payload) # do the math to get the checksum
-        self.ser.write(bytes([SOF, TYPE_TELEM, len(payload)]) + payload + bytes([chk])) # ship the whole frame
-        self.ser.flush() # force it out of the buffer right now
+def execute_circle(bridge, speed, yaw_rate_deg, circles=1): # arc move
+    # blends forward juice and turning juice to make an arc
+    print(f"[Ground] CIRCLE: Speed {speed}m/s | Yaw Rate {yaw_rate_deg}deg/s | count {circles}") # log circle
+    duration = (360.0 / abs(yaw_rate_deg)) * circles # calc time
+    
+    msg = vehicle.message_factory.set_position_target_local_ned_encode( # build circle msg
+        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0x05C7, # velocity mask
+        0, 0, 0, speed, 0, 0, 0, 0, 0, 0, # forward speed
+        math.radians(yaw_rate_deg)) # yaw rate
+    
+    start_t = time.time() # start clock
+    while (time.time() - start_t) < duration: # loop
+        vehicle.send_mavlink(msg) # blast mavlink
+        broadcast_status(bridge, 0) # update drone
+        time.sleep(0.1) # 10hz
+        
+    # hard stop
+    stop_msg = vehicle.message_factory.set_position_target_local_ned_encode( # build stop
+        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0x05C7, # zeros
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) # zeros
+    vehicle.send_mavlink(stop_msg) # blast stop
+    time.sleep(0.5) # let settle
 
-    def send_command(self, cmdSeq, cmd, estop): # the sender i made for mission orders
-        # packages a command up and sends it over to the other esp32
-        payload = struct.pack(CMD_FMT, cmdSeq, cmd, estop) # pack it down to tiny binary
-        chk = self._chk_xor(TYPE_CMD, len(payload), payload) # get the checksum again
-        self.ser.write(bytes([SOF, TYPE_CMD, len(payload)]) + payload + bytes([chk])) # ship the frame
-        self.ser.flush() # force it out immediately
+####
 
-    def send_message(self, text: str): # sender i built for raw talk
-        # sends a raw line of text like hello uav over the air
-        payload = text[:60].encode('ascii', errors='ignore') # clip it so its not too long and encode it
-        chk = self._chk_xor(TYPE_MSG, len(payload), payload) # calculate the checksum
-        self.ser.write(bytes([SOF, TYPE_MSG, len(payload)]) + payload + bytes([chk])) # ship it down the wire
-        self.ser.flush() # force it out
+def execute_gps_denied_goto(bridge, x, y, avoidance_mode=False): # navigate to relative coords
+    # tells the ugv to move to a relative position (NED)
+    # x = forward/back, y = right/left
+    print(f"[Ground] >>> GOTO RELATIVE: X={x}m, Y={y}m (Avoidance: {avoidance_mode})") # log goto
+    
+    if not avoidance_mode: # if direct path
+        # standard direct path
+        msg = vehicle.message_factory.set_position_target_local_ned_encode( # build target msg
+            0, 0, 0, mavutil.mavlink.MAV_FRAME_LOCAL_NED, 0b0000111111111000, # position mask
+            x, y, 0, 0, 0, 0, 0, 0, 0, 0, 0) # target coords
+        vehicle.send_mavlink(msg) # blast mavlink
+    else: # if dodging buckets
+        # simplistic avoidance loop (the 5ft rule)
+        # we would use OAK-D-Lite depth here to steer away
+        detector = ObstacleDetector() # setup cam
+        found, angle, dist = detector.check_for_buckets() # search field
+        
+        if found: # if something is there
+            log_avoidance(f"Obstacle Detected at {dist}m, Angle {angle}!") # log detection
+            log_avoidance("Path Decision: Re-routing right (90 deg pivot)") # log path
+            execute_turn(bridge, 90) # steer away
+            execute_drive(bridge, 1.5) # move 5ft away
+            log_avoidance("Avoidance Maneuver Complete. Returning to Target Path.") # log success
+        
+        # continue to final coords
+        msg = vehicle.message_factory.set_position_target_local_ned_encode( # build target coords
+            0, 0, 0, mavutil.mavlink.MAV_FRAME_LOCAL_NED, 0b0000111111111000, # position mask
+            x, y, 0, 0, 0, 0, 0, 0, 0, 0, 0) # target
+        vehicle.send_mavlink(msg) # blast mavlink
+
+def main(): # the main executor loop
+    # start the bridge link to the drone
+    bridge = v2v_bridge.V2VBridge(ESP32_BRIDGE_PORT, name="UGV-Bridge") # bridge object
+    try: # try to open serial
+        bridge.connect() # open serial wires
+        bridge.send_message("ground station is live . awaiting drone orders") # yell startup
+    except: return # fail if no wire
+
+    seq = 0 # status sequence
+    mission_active = False # mission flag
+    mission_3_avoidance = False # dodge flag
+    drive_msg = None # current move command
+
+    try: # main loop
+        while True: # loop forever
+            # 1. broadcast status so the drone doesn't worry
+            broadcast_status(bridge, seq) # update drone
+            seq += 1 # increment
+
+            # [DEBUG] check for raw string talk (Coordinate Parsing)
+            msg_str = bridge.get_message() # check string mailbox
+            if msg_str: # if there is a shout
+                print(f"[Ground] Incoming Shout: {msg_str}") # log it
+                if msg_str.startswith("GOTO:"): # if it's coordinates
+                    try: # try to parse
+                        _, coords = msg_str.split(":") # split shout
+                        x_val, y_val = map(float, coords.split(",")) # parse numbers
+                        if not vehicle.armed: arm_and_sync(bridge) # arm if needed
+                        execute_gps_denied_goto(bridge, x_val, y_val, avoidance_mode=mission_3_avoidance) # move
+                    except: print("!!! [ERROR] Failed to parse coordinates !!!") # fail log
+
+            # 2. check for orders from the drone
+            cmd = bridge.get_command() # check command mailbox
+            if cmd: # if drone wants a chore
+                cmdSeq, cmdVal, eStop = cmd # unpack command
+                print(f"[Ground] Got Choice Order: {cmdVal}") # log it
+
+                if eStop == 1: # if we hit the big red button
+                    print("!!! [ABORT] EMERGENCY DISARM !!!") # log panic
+                    mission_active = False # kill mission
+                    drive_msg = None # kill move
+                    vehicle.armed = False # kill motors
+                    continue # skip to next loop
+
+                if not vehicle.armed: # if motors off
+                    arm_and_sync(bridge) # wake it up
+
+                if cmdVal == v2v_bridge.CMD_MOVE_FORWARD: # forward chore
+                    execute_drive(bridge, 3.048) # 10ft
+                elif cmdVal == v2v_bridge.CMD_MOVE_2FT: # 2ft chore
+                    execute_drive(bridge, 0.61) # 2ft
+                elif cmdVal == v2v_bridge.CMD_TURN_RIGHT: # right chore
+                    execute_turn(bridge, 90) # pivot 90
+                elif cmdVal == v2v_bridge.CMD_TURN_LEFT: # left chore
+                    execute_turn(bridge, -90) # pivot -90
+                elif cmdVal == v2v_bridge.CMD_CIRCLE: # circle chore
+                    execute_circle(bridge, 1.0, 45, circles=2) # spin 2 laps
+                elif cmdVal == v2v_bridge.CMD_MISSION_1 or cmdVal == v2v_bridge.CMD_MISSION_2 or cmdVal == v2v_bridge.CMD_MISSION_3: # mission start
+                    mission_active = True # set live
+                    drive_msg = execute_drive_forever(bridge, 0.15) # constant slow drive
+                    if cmdVal == v2v_bridge.CMD_MISSION_3: # if obstacle dodging
+                        mission_3_avoidance = True # flip dodge bit
+                        log_avoidance("Mission 3 Active: Obstacle Avoidance Engaged.") # log avoidance
+                elif cmdVal == v2v_bridge.CMD_STOP: # stop chore
+                    mission_active = False # kill flag
+                    mission_3_avoidance = False # kill dodge
+                    drive_msg = None # kill move
+                    if vehicle.armed: # if live
+                        log_avoidance("Destination Arrival / Manual Stop.") # log arrival
+                    stop_msg = vehicle.message_factory.set_position_target_local_ned_encode( # build stop msg
+                        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0b0000111111111111, # zeros
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) # zeros
+                    vehicle.send_mavlink(stop_msg) # blast stop
+
+            if mission_active and drive_msg: # if mission is driving
+                vehicle.send_mavlink(drive_msg) # keep blasting forward pulse
+
+            time.sleep(1.0 / TELEM_SEND_HZ) # wait for next cycle
+
+    except KeyboardInterrupt: # someone hit ctrl+c
+        pass # just let it close
+    finally: # clean up always
+        bridge.stop() # shut down radio link
+        vehicle.close() # shut down pixhawk link
+
+if __name__ == "__main__": # entry point
+    main() # run the boss
