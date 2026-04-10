@@ -24,6 +24,7 @@ ESP32_BRIDGE_PORT = "/dev/ttyUSB0"
 # Motion tuning
 # ----------------------------
 SPEED_MPH = 0.8
+TURN_ANGLE_DEG = 15.0
 TURN_RATE_DEG_S = 45.0
 MOVEMENT_EPS_MPS = 0.05
 TELEM_SEND_HZ = 5
@@ -367,10 +368,10 @@ def execute_challenge2_move(vehicle, bridge, x_m, y_m):
     if second_leg > 0:
         if y_m > 0:
             print("Leg 2 setup: target is to the RIGHT, turning right 90 deg")
-            turn_right(vehicle, bridge, 90.0, TURN_RATE_DEG_S)
+            turn_right(vehicle, bridge, TURN_ANGLE_DEG, TURN_RATE_DEG_S)
         elif y_m < 0:
             print("Leg 2 setup: target is to the LEFT, turning left 90 deg")
-            turn_left(vehicle, bridge, 90.0, TURN_RATE_DEG_S)
+            turn_left(vehicle, bridge, TURN_ANGLE_DEG, TURN_RATE_DEG_S)
 
         time.sleep(4.0)
 
