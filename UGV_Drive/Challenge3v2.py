@@ -35,7 +35,7 @@ TURN_RATE_DEG_S          = 45.0
 # Estimated forward progress gained along the original mission direction
 # from ONE completed avoidance maneuver.
 # Tune this after testing.
-ESTIMATED_AVOIDANCE_FORWARD_PROGRESS_FT = 3.0
+ESTIMATED_AVOIDANCE_FORWARD_PROGRESS_FT = 4.0
 
 # Safety / behavior limits
 MAX_AVOIDANCE_DEPTH = 8   # prevents infinite recursion if area is too cluttered
