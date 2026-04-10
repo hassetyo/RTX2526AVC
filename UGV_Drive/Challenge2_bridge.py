@@ -361,21 +361,16 @@ def execute_challenge2_move(vehicle, bridge, x_m, y_m):
     first_leg = abs(x_m)
     second_leg = abs(y_m)
 
-    if first_leg > 0:
-        drive_distance(vehicle, bridge, first_leg, SPEED_MPS)
-        send_stop(vehicle)
-        time.sleep(1.0)
 
-    if second_leg > 0:
-        if y_m > 0:
-            turn_right(vehicle, bridge, 90.0, TURN_RATE_DEG_S, TURN_TOLERANCE_DEG)
-        else:
-            turn_left(vehicle, bridge, 90.0, TURN_RATE_DEG_S, TURN_TOLERANCE_DEG)
+    drive_distance(vehicle, bridge, first_leg, SPEED_MPS)
+    send_stop(vehicle)
+    time.sleep(1.0)
 
-        time.sleep(1.0)
-        drive_distance(vehicle, bridge, second_leg, SPEED_MPS)
-        send_stop(vehicle)
-        time.sleep(1.0)
+    turn_left(vehicle, bridge, 90.0, TURN_RATE_DEG_S, TURN_TOLERANCE_DEG)
+    time.sleep(4.0)
+    drive_distance(vehicle, bridge, second_leg, SPEED_MPS)
+    send_stop(vehicle)
+    time.sleep(1.0)
 
 
 def main():
