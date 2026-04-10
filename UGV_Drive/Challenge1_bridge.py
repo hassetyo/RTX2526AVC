@@ -5,12 +5,10 @@ import math
 import v2v_bridge
 
 # ==========================================
-# CHALLENGE 2 GROUND STATION
+# CHALLENGE 1 GROUND STATION
 # Wait for UAV coordinates, then move there
-# using Challenge 2 style motion:
+# using Challenge 1 style motion:
 #   1) drive straight
-#   2) turn using compass/heading feedback
-#   3) drive straight
 # ==========================================
 
 # ----------------------------
@@ -401,7 +399,7 @@ def execute_challenge2_move(vehicle, bridge, x_m, y_m):
     
     
 
-    print("Challenge 2 move complete.")
+    print("Challenge 1 move complete.")
 
 
 def parse_goto_message(msg_str):
@@ -420,7 +418,7 @@ def main():
     bridge = None
 
     print("==========================================")
-    print("UGV Challenge 2 Ground Station")
+    print("UGV Challenge 1 Ground Station")
     print("==========================================")
     print(f"Connecting to UGV at {UGV_CONTROL_PORT}...")
     print(f"Target speed: {SPEED_MPH:.1f} mph ({SPEED_MPS:.4f} m/s)")
@@ -437,7 +435,7 @@ def main():
         bridge = v2v_bridge.V2VBridge(ESP32_BRIDGE_PORT, name="UGV-Bridge")
         bridge.connect()
 
-        bridge.send_message("challenge 2 ground station armed and awaiting coordinates")
+        bridge.send_message("challenge 1 ground station armed and awaiting coordinates")
 
         seq = 0
 
