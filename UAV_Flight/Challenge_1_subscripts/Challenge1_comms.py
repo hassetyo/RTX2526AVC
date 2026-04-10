@@ -1,21 +1,18 @@
 import time
 import v2v_bridge
 
-# UAV-SIDE COMMAND SCRIPT
-# Sends commands to the UGV through the V2V bridge.
-# Mission:
-#   1) move forward 8 ft total = 4 x 2 ft
-#   2) stop
-#   3) turn left 90 degrees
-#   4) stop
+# UAV-SIDE SCRIPT FOR CHALLENGE 1
+# Sends only the destination to the UGV.
+# Challenge 1:
+#   - no turning
+#   - no x movement
+#   - UGV goes straight to y only
 
 UAV_BRIDGE_PORT = "/dev/ttyUSB0"   # update if needed
 
-
-def send_cmd(bridge, seq, cmd, label, estop=0):
-    extra = " | ESTOP=1" if estop else ""
-    print(f"[UAV] Sending command {seq}: {label}{extra}")
-    bridge.send_command(seq, cmd, estop)
+# Destination for Challenge 1
+# Example: go straight 8 ft
+Y_DISTANCE_FT = 8.0
 
 
 def main():
@@ -24,32 +21,25 @@ def main():
     try:
         bridge.connect()
         time.sleep(1.0)
-        bridge.send_message("uav online - sending 8ft left-turn mission")
 
-        seq = 1
+        # x must stay 0 for Challenge 1
+        x_ft = 0.0
+        y_ft = Y_DISTANCE_FT
 
-        # Move forward 8 ft total = 4 x 2 ft
-        for i in range(4):
-            send_cmd(bridge, seq, v2v_bridge.CMD_MOVE_2FT, f"MOVE_2FT #{i+1}")
-            seq += 1
-            time.sleep(2.5)
+        # Send destination as GOTO:x,y in meters
+        bridge.send_challenge2_coords_ft(x_ft, y_ft)
 
-        # Explicit stop after forward motion
-        send_cmd(bridge, seq, v2v_bridge.CMD_STOP, "STOP")
-        seq += 1
-        time.sleep(2.0)
+        print(f"[UAV] Sent Challenge 1 destination: x={x_ft:.1f} ft, y={y_ft:.1f} ft")
 
-        # Turn left 90 degrees
-        send_cmd(bridge, seq, v2v_bridge.CMD_TURN_LEFT, "TURN_LEFT_90")
-        seq += 1
-        time.sleep(4.0)
+        # Optional: wait briefly for a completion message
+        start = time.time()
+        timeout_s = 15.0
 
-        # Final stop for safety
-        send_cmd(bridge, seq, v2v_bridge.CMD_STOP, "STOP_AFTER_TURN")
-        seq += 1
-        time.sleep(2.0)
-
-        print("[UAV] Mission commands sent.")
+        while time.time() - start < timeout_s:
+            msg = bridge.get_message()
+            if msg:
+                print(f"[UAV] Received: {msg}")
+            time.sleep(0.1)
 
     except KeyboardInterrupt:
         print("[UAV] Interrupted by user.")
