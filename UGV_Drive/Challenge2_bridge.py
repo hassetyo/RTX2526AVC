@@ -24,7 +24,7 @@ ESP32_BRIDGE_PORT = "/dev/ttyUSB0"
 # Motion tuning
 # ----------------------------
 SPEED_MPH = 0.8
-TURN_ANGLE_DEG = 75.0
+TURN_ANGLE_DEG = 70.0
 TURN_RATE_DEG_S = 10.0
 TURN_TOLERANCE_DEG = 5.0
 MOVEMENT_EPS_MPS = 0.05
@@ -391,27 +391,20 @@ def execute_challenge2_move(vehicle, bridge, x_m, y_m):
     first_leg = abs(x_m)
     second_leg = abs(y_m)
 
-    if x_m < 0:
-        print("Negative x received. This script currently treats x as forward magnitude only.")
-        print("If you need reverse motion, we can add a reverse command later.")
+    
 
-    if first_leg > 0:
-        print(f"Leg 1: driving forward {first_leg:.3f} m")
-        drive_distance(vehicle, bridge, first_leg, SPEED_MPS)
-        time.sleep(4.0)
 
-    if second_leg > 0:
-        if y_m > 0:
-            print("Leg 2 setup: target is to the RIGHT, turning right")
-            turn_right(vehicle, bridge, TURN_ANGLE_DEG, TURN_RATE_DEG_S, TURN_TOLERANCE_DEG)
-        elif y_m < 0:
-            print("Leg 2 setup: target is to the LEFT, turning left")
-            turn_left(vehicle, bridge, TURN_ANGLE_DEG, TURN_RATE_DEG_S, TURN_TOLERANCE_DEG)
+    print(f"Leg 1: driving forward {first_leg:.3f} m")
+    drive_distance(vehicle, bridge, first_leg, SPEED_MPS)
+    time.sleep(4.0)
 
-        time.sleep(4.0)
+    
+    turn_left(vehicle, bridge, TURN_ANGLE_DEG, TURN_RATE_DEG_S, TURN_TOLERANCE_DEG)
 
-        print(f"Leg 2: driving lateral-equivalent leg {second_leg:.3f} m")
-        drive_distance(vehicle, bridge, second_leg, SPEED_MPS)
+    time.sleep(4.0)
+
+    print(f"Leg 2: driving lateral-equivalent leg {second_leg:.3f} m")
+    drive_distance(vehicle, bridge, second_leg, SPEED_MPS)
 
     print("Challenge 2 move complete.")
 
