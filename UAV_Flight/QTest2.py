@@ -388,7 +388,7 @@ def main():  # the main boss function
             if pos_x is not None and pos_y is not None:
                 print(f"Optical Flow Position - X: {pos_x:.2f}, Y: {pos_y:.2f}, Quality: {quality}", end="\r", flush=True)
             else:
-                print("Waiting for optical flow data...", end="\r", flush=True)
+                print("Waiting for optical flow data...")
             time.sleep(0.1)
 
         '''
