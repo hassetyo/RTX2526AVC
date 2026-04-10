@@ -13,6 +13,7 @@ BAUD_RATE = 57600                     # serial speed for hardware connections
 
 # mission params
 TARGET_ALT = 1.3          # target hover height in meters
+TARGET_LAND_ALT = 0.5     # target landing height in meters
 HOVER_TIME_S = 8.0        # how long to hold altitude before landing
 ALT_TOL = 0.12            # acceptable altitude error band
 CLIMB_LOOP_DT = 0.10      # climb loop speed
@@ -287,6 +288,7 @@ def land_safely(master, target_land_alt = 0.2):  # lets land mode do a controlle
     will slowly descend by decreasing the throttle to a gentle descending level
     once the drone is close to the ground, the drone will enter land mode
     """
+    change_mode(master, "STABILIZE")
     log_event(f"Descending to {target_land_alt:.2f} m...")
 
     set_throttle(master, THROTTLE_HOVER)
@@ -317,6 +319,7 @@ def land_safely(master, target_land_alt = 0.2):  # lets land mode do a controlle
                 elif (time.time() - stable_start) >= 1.2:
                     print()  # move off the carriage-return line cleanly
                     log_event(f"Target altitude reached and stabilized: {alt:.2f} m")
+                    change_mode(master, "LAND")
                     return
             else:
                 stable_start = None
@@ -378,8 +381,8 @@ def main():  # the main boss function
         print()
         log_event(f"Mission error: {e}")
         try:
-            change_mode(master, "LAND")
             land_safely(master)
+            change_mode(master, "LAND")
         except Exception:
             pass
         time.sleep(1)
