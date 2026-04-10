@@ -1,10 +1,12 @@
 from pymavlink import mavutil  # using the confirmed mavlink pattern instead of dronekit
 import time  # for timing and sleeps
 import math  # for simple comparisons
+import signal  # so we can intercept ctrl+c without dying
 
 # uav simple altitude mission - arm + climb + hover + land
 # keeps the overall style close to mission 4 but removes rover/radio pieces
 # uses stabilize for liftoff, alt hold for hover, and land for a gentle touchdown
+# NOTE: ctrl+c will NOT kill this script mid-flight, it only schedules a graceful land
 
 ################################# config stuff i setup
 # connection settings
@@ -18,7 +20,7 @@ ALT_TOL = 0.12            # acceptable altitude error band
 CLIMB_LOOP_DT = 0.10      # climb loop speed
 HOVER_LOOP_DT = 0.10      # hover loop speed
 LAND_LOOP_DT = 0.25       # landing print loop speed
-LAND_TIMEOUT_S = 60.0     # safety timeout for landing
+LAND_TIMEOUT_S = 60.0     # safety timeout for landing (fallback only - cube heartbeat is primary)
 
 # throttle settings i tuned
 THROTTLE_MIN = 1000       # motors off / minimum throttle
@@ -28,6 +30,21 @@ THROTTLE_HOVER = 1500     # mid-stick hover command for alt hold
 
 # logging
 LOG_FILE = "alt_hold_hover_land_log.txt"
+
+# global flag set by the signal handler so ctrl+c schedules a land instead of killing us
+_land_requested = False  # flipped to True when ctrl+c is caught
+
+############################ signal handler so ctrl+c never hard-kills the process
+
+def _handle_sigint(signum, frame):  # intercepts ctrl+c at the os level
+    global _land_requested  # reach into global space to flip the flag
+    if not _land_requested:  # only print the message the first time
+        print()  # move off any carriage-return line cleanly
+        log_event("[!] Ctrl+C caught. Landing will be initiated at the next safe point.")
+    _land_requested = True  # set the flag so the mission loops check it
+
+signal.signal(signal.SIGINT, _handle_sigint)   # redirect ctrl+c to our handler
+signal.signal(signal.SIGTERM, _handle_sigint)  # also catch kill signals for robustness
 
 ############################ the mavlink helpers i wrote
 
@@ -175,6 +192,8 @@ def wait_for_good_altitude(master, timeout_s=5.0):  # makes sure we actually hav
 
 
 def climb_to_target(master, target_alt):  # manual climb like mission 4, then settle near target
+    global _land_requested  # check the flag in case ctrl+c came during climb
+
     log_event(f"Climbing to {target_alt:.2f} m...")
 
     set_throttle(master, THROTTLE_IDLE)
@@ -182,6 +201,10 @@ def climb_to_target(master, target_alt):  # manual climb like mission 4, then se
 
     stable_start = None
     while True:
+        if _land_requested:  # ctrl+c came in, bail out of the climb immediately
+            log_event("[!] Land requested during climb. Stopping climb early.")
+            return
+
         alt = print_altitude(master, prefix="Climb Alt")
 
         if alt is None:
@@ -211,11 +234,17 @@ def climb_to_target(master, target_alt):  # manual climb like mission 4, then se
 
 
 def hover_in_alt_hold(master, hover_time_s):  # switches to alt hold and keeps throttle centered
+    global _land_requested  # check the flag so ctrl+c cuts the hover short safely
+
     change_mode(master, "ALT_HOLD", "ALTHOLD")
     log_event(f"Holding altitude for {hover_time_s:.1f} seconds...")
 
     start_t = time.time()
     while (time.time() - start_t) < hover_time_s:
+        if _land_requested:  # ctrl+c came in, skip the rest of the hover immediately
+            log_event("[!] Land requested during hover. Ending hover early.")
+            break
+
         alt = print_altitude(master, prefix="Hover Alt")
 
         # in alt hold, keeping throttle near mid-stick tells the autopilot to maintain altitude
@@ -234,45 +263,50 @@ def hover_in_alt_hold(master, hover_time_s):  # switches to alt hold and keeps t
     log_event("Hover segment complete.")
 
 
-def land_safely(master):  # lets land mode do a controlled descent and auto-disarm
+def land_safely(master):
+    # switches to land mode and then BLOCKS until the cube's heartbeat confirms
+    # that the drone has actually disarmed (motors stopped) - no guessing from altitude.
+    # a timeout fallback is still in place so we never hang forever.
     log_event("Landing sequence engaged...")
     change_mode(master, "LAND")
     clear_rc_override(master)  # let land mode fully control the descent
 
-    deadline = time.time() + LAND_TIMEOUT_S
+    log_event("Waiting for Cube heartbeat to confirm touchdown and auto-disarm...")
+
+    deadline = time.time() + LAND_TIMEOUT_S  # hard fallback so we never hang forever
     while time.time() < deadline:
-        alt = print_altitude(master, prefix="Land Alt")
+        # primary confirmation: cube heartbeat says motors are no longer armed
+        hb = master.recv_match(type="HEARTBEAT", blocking=True, timeout=2.0)  # blocking wait up to 2s per beat
+        if hb is not None:
+            motors_armed = bool(hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)  # check armed bit
+            if not motors_armed:
+                # the cube itself told us the motors stopped - this is the real touchdown confirmation
+                print()  # move off carriage-return line
+                log_event("Cube heartbeat confirmed: motors disarmed. Touchdown complete.")
+                return  # landing confirmed, exit
 
-        if not master.motors_armed():
-            print()
-            log_event("Touchdown confirmed. Motors stopped.")
-            return
-
-        # fallback: if we appear to be on the ground but still armed for a while, try disarm once
-        if alt is not None and alt <= 0.08:
-            time.sleep(2.0)
-            if master.motors_armed():
-                log_event("Very low altitude detected for 2s; sending disarm fallback.")
-                disarm_drone(master)
-                time.sleep(1.0)
-                if not master.motors_armed():
-                    print()
-                    log_event("Touchdown confirmed after fallback disarm.")
-                    return
-
+        # also print altitude while we wait so the operator can see the descent
+        print_altitude(master, prefix="Land Alt")
         time.sleep(LAND_LOOP_DT)
 
-    raise RuntimeError("Landing timed out before disarm confirmation.")
+    # if we hit the deadline without a disarm heartbeat, log a warning but do not crash out
+    print()
+    log_event("[WARNING] Landing timeout reached without cube disarm confirmation. Sending disarm fallback.")
+    disarm_drone(master)  # one last attempt to stop the motors
+    time.sleep(2.0)  # give the cube a moment to process the disarm
+    log_event("Disarm fallback sent. Assuming landed.")
+
 
 #################### the main mission logic
 
 def main():  # the main boss function
     with open(LOG_FILE, "w") as f:
-        f.write("")
+        f.write("")  # clear the log file at the start of each run
 
     log_event("==========================================")
     log_event("   UAV ALT HOLD HOVER + SAFE LAND MISSION")
     log_event("==========================================")
+    log_event("NOTE: Ctrl+C will NOT kill this process. It only requests a graceful land.")
 
     log_event(f"Connecting to Drone: {CONNECTION_STRING}...")
     if CONNECTION_STRING.startswith("udp:") or CONNECTION_STRING.startswith("tcp:"):
@@ -285,49 +319,44 @@ def main():  # the main boss function
 
     request_message_streams(master)
 
-    try:
-        #wait_for_good_altitude(master)
-
-        # step 1: start in stabilize like your mission 4 pattern
-        change_mode(master, "STABILIZE")
-        arm_drone(master)
-
-        # step 2: climb to the requested height
-        climb_to_target(master, TARGET_ALT)
-
-        # step 3: maintain altitude using alt hold
-        hover_in_alt_hold(master, HOVER_TIME_S)
-
-        # step 4: safely and slowly land
-        land_safely(master)
-
-    except KeyboardInterrupt:
-        print()
-        log_event("[!] Keyboard interrupt received. Switching to LAND now...")
+    # ---- outer keepalive shell ----
+    # this loop makes sure that even if something blows up deep in the mission
+    # we always attempt to land before the script exits. it will not stop
+    # looping until land_safely() has actually run to completion.
+    landed = False  # tracks whether land_safely has finished successfully
+    while not landed:
         try:
+            if not _land_requested:
+                # step 1: start in stabilize like your mission 4 pattern
+                change_mode(master, "STABILIZE")
+                arm_drone(master)
+
+                # step 2: climb to the requested height
+                climb_to_target(master, TARGET_ALT)
+
+                # step 3: maintain altitude using alt hold
+                hover_in_alt_hold(master, HOVER_TIME_S)
+
+            # step 4: land - this is always reached no matter what happened above
             land_safely(master)
-        except Exception as land_err:
-            log_event(f"Landing fallback error: {land_err}")
+            landed = True  # land_safely completed cleanly, we can exit the outer loop
+
+        except Exception as e:
+            # something unexpected blew up - log it but do NOT exit
+            # the outer while loop will bring us back around and try to land again
+            print()
+            log_event(f"[ERROR] Unexpected exception: {e}. Attempting emergency land in 2s...")
+            time.sleep(2.0)  # short pause before the retry so we dont spam the cube
             try:
+                change_mode(master, "LAND")  # try to get into land mode before looping
                 clear_rc_override(master)
-                disarm_drone(master)
             except Exception:
-                pass
+                pass  # if even this fails, the outer loop will retry land_safely
 
-    except Exception as e:
-        print()
-        log_event(f"Mission error: {e}")
-        try:
-            change_mode(master, "LAND")
-            clear_rc_override(master)
-        except Exception:
-            pass
-        time.sleep(1)
-
-    finally:
-        print()
-        clear_rc_override(master)
-        log_event("Mission finalized.")
+    # ---- mission complete ----
+    print()
+    clear_rc_override(master)
+    log_event("Mission finalized. Script exiting now.")
 
 
 if __name__ == "__main__":
