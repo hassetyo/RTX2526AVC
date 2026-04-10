@@ -14,9 +14,6 @@ import v2v_bridge
 # we send that 4 times to get 8 ft total.
 
 UAV_BRIDGE_PORT = "/dev/ttyUSB0"   # update if your UAV-side ESP32 is on another port
-COMMAND_DELAY = 1.2                 # delay between 2 ft movement commands
-TURN_DELAY = 2.5                    # delay for the 90-degree turn to finish
-FINAL_DELAY = 1.0                   # small pause before disarm
 
 
 def send_cmd(bridge, seq, cmd, label, estop=0):
@@ -36,26 +33,24 @@ def main():
         seq = 1
 
         # Move forward 8 ft total = 4 x 2 ft
-        for step in range(4):
-            send_cmd(bridge, seq, v2v_bridge.CMD_MOVE_2FT, f"MOVE_2FT ({step + 1}/4)")
-            seq += 1
-            time.sleep(COMMAND_DELAY)
+        send_cmd(bridge, seq, v2v_bridge.CMD_MOVE_8FT, f"MOVE_8FT")
+        seq+=1
+        time.sleep(4.0)
 
         # Explicit stop after the forward motion
         send_cmd(bridge, seq, v2v_bridge.CMD_STOP, "STOP")
         seq += 1
-        time.sleep(1.0)
+        time.sleep(4.0)
 
         # Turn left 90 degrees
         send_cmd(bridge, seq, v2v_bridge.CMD_TURN_LEFT, "TURN_LEFT_90")
         seq += 1
-        time.sleep(TURN_DELAY)
+        time.sleep(4.0)
 
         # Final stop for safety
         send_cmd(bridge, seq, v2v_bridge.CMD_STOP, "STOP_AFTER_TURN")
         seq += 1
-        time.sleep(FINAL_DELAY)
-
+        time.sleep(4.0)
         print("[UAV] Mission commands sent.")
 
     except KeyboardInterrupt:
