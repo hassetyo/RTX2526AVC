@@ -23,7 +23,7 @@ GREEN_LED_PIN = 16
 RED_LED_PIN   = 19
 
 # Mission Parameters
-INITIAL_DISTANCE_FT      = 8.0   # first leg
+INITIAL_DISTANCE_FT      = 12.0   # first leg
 SECOND_DISTANCE_FT       = 8.0   # second leg
 AVOIDANCE_DISTANCE_FT    = 2.0   # side-step leg length for avoidance path
 BYPASS_FORWARD_DISTANCE_FT = 3.0 # forward leg while bypassing obstacle
