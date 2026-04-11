@@ -23,14 +23,22 @@ GREEN_LED_PIN = 16
 RED_LED_PIN   = 19
 
 # Mission Parameters
-INITIAL_DISTANCE_FT      = 10.0   # first leg
-SECOND_DISTANCE_FT       = 8.0   # second leg
-AVOIDANCE_DISTANCE_FT    = 2.0   # side-step leg length for avoidance path
-BYPASS_FORWARD_DISTANCE_FT = 3.0 # forward leg while bypassing obstacle
-OBSTACLE_THRESHOLD_FT    = 1.5   # lidar trigger threshold
-SPEED_MPH                = 0.8
-TURN_ANGLE_DEG           = 40.0
-TURN_RATE_DEG_S          = 45.0
+INITIAL_DISTANCE_FT        = 10.0   # first leg
+SECOND_DISTANCE_FT         = 8.0    # second leg
+AVOIDANCE_DISTANCE_FT      = 2.0    # side-step leg length for avoidance path
+BYPASS_FORWARD_DISTANCE_FT = 3.0    # forward leg while bypassing obstacle
+OBSTACLE_THRESHOLD_FT      = 2.0    # lidar trigger threshold
+SPEED_MPH                  = 0.8
+
+# Compass-based turn tuning copied from Challenge2 style
+TURN_ANGLE_DEG      = 90.0
+TURN_RATE_DEG_S     = 10.0
+TURN_TOLERANCE_DEG  = 5.0
+
+# Slow-compass turn tuning
+HEADING_CHECK_INTERVAL_S = 0.20
+STOP_EARLY_DEG           = 8.0
+STABLE_COUNT_REQUIRED    = 2
 
 # Estimated forward progress gained along the original mission direction
 # from ONE completed avoidance maneuver.
@@ -224,6 +232,23 @@ def send_stop(vehicle, repeats=5):
         time.sleep(0.1)
 
 
+def get_heading(vehicle):
+    h = vehicle.heading
+    if h is None:
+        raise RuntimeError("vehicle.heading is unavailable")
+    return float(h)
+
+
+def angle_diff_deg(current_deg, start_deg):
+    """
+    Smallest signed angle from start_deg to current_deg, in degrees.
+    Result is in [-180, 180].
+    Positive = clockwise/right
+    Negative = counterclockwise/left
+    """
+    return ((current_deg - start_deg + 540) % 360) - 180
+
+
 # --------------------------------------------------
 # Lidar filtering helper
 # --------------------------------------------------
@@ -332,54 +357,117 @@ def drive_forward(vehicle, lidar_ser, distance_m, speed_mps,
         time.sleep(0.5)
 
 
-def turn_right(vehicle, angle_deg, yaw_rate_deg_s, green, red, flashing=False):
-    duration_s      = abs(angle_deg) / yaw_rate_deg_s
-    turn_msg        = build_attitude_msg(
+def turn_right(vehicle, angle_deg, yaw_rate_deg_s, green, red, flashing=False, tolerance_deg=5.0):
+    if angle_deg <= 0:
+        return
+
+    start_heading = get_heading(vehicle)
+    target_change = abs(angle_deg)
+    stop_target = target_change - STOP_EARLY_DEG
+
+    turn_msg = build_attitude_msg(
         vehicle,
         throttle_fraction=0.0,
         yaw_rate_deg_s=abs(yaw_rate_deg_s)
     )
-    start_t         = time.time()
+
     last_print      = 0.0
     last_flash_time = time.time()
+    stable_count    = 0
 
-    print(f"TURN RIGHT: angle={angle_deg:.1f} deg  rate={yaw_rate_deg_s:.1f} deg/s")
-    while (time.time() - start_t) < duration_s:
+    print(
+        f"TURN RIGHT using slow heading updates: "
+        f"start={start_heading:.1f} target=+{target_change:.1f} "
+        f"stop_target=+{stop_target:.1f}"
+    )
+
+    while True:
         vehicle.send_mavlink(turn_msg)
-        elapsed = time.time() - start_t
+
         if flashing:
             last_flash_time = flash_red_tick(red, last_flash_time)
-        if elapsed - last_print >= 0.5:
-            print(f"  turning... t={elapsed:3.1f}s")
-            last_print = elapsed
-        time.sleep(0.05)
+
+        time.sleep(HEADING_CHECK_INTERVAL_S)
+
+        current_heading = get_heading(vehicle)
+        delta = angle_diff_deg(current_heading, start_heading)
+
+        now = time.time()
+        if now - last_print >= 0.2:
+            print(f"  heading={current_heading:.1f} delta={delta:.1f}")
+            last_print = now
+
+        if delta >= (stop_target - tolerance_deg):
+            stable_count += 1
+        else:
+            stable_count = 0
+
+        if stable_count >= STABLE_COUNT_REQUIRED:
+            break
 
     send_stop(vehicle)
+    time.sleep(0.6)
+
+    final_heading = get_heading(vehicle)
+    final_delta = angle_diff_deg(final_heading, start_heading)
+    print(f"TURN RIGHT done: final={final_heading:.1f} delta={final_delta:.1f}")
 
 
-def turn_left(vehicle, angle_deg, yaw_rate_deg_s, green, red, flashing=False):
-    duration_s      = abs(angle_deg) / yaw_rate_deg_s
-    turn_msg        = build_attitude_msg(
+def turn_left(vehicle, angle_deg, yaw_rate_deg_s, green, red, flashing=False, tolerance_deg=5.0):
+    if angle_deg <= 0:
+        return
+
+    start_heading = get_heading(vehicle)
+    target_change = abs(angle_deg)
+    stop_target = target_change - STOP_EARLY_DEG
+
+    turn_msg = build_attitude_msg(
         vehicle,
         throttle_fraction=0.0,
         yaw_rate_deg_s=-abs(yaw_rate_deg_s)
     )
-    start_t         = time.time()
+
     last_print      = 0.0
     last_flash_time = time.time()
+    stable_count    = 0
 
-    print(f"TURN LEFT: angle={angle_deg:.1f} deg  rate={yaw_rate_deg_s:.1f} deg/s")
-    while (time.time() - start_t) < duration_s:
+    print(
+        f"TURN LEFT using slow heading updates: "
+        f"start={start_heading:.1f} target=-{target_change:.1f} "
+        f"stop_target=-{stop_target:.1f}"
+    )
+
+    while True:
         vehicle.send_mavlink(turn_msg)
-        elapsed = time.time() - start_t
+
         if flashing:
             last_flash_time = flash_red_tick(red, last_flash_time)
-        if elapsed - last_print >= 0.5:
-            print(f"  turning... t={elapsed:3.1f}s")
-            last_print = elapsed
-        time.sleep(0.05)
+
+        time.sleep(HEADING_CHECK_INTERVAL_S)
+
+        current_heading = get_heading(vehicle)
+        delta = angle_diff_deg(current_heading, start_heading)
+
+        now = time.time()
+        if now - last_print >= 0.2:
+            print(f"  heading={current_heading:.1f} delta={delta:.1f}")
+            last_print = now
+
+        if delta <= -(stop_target - tolerance_deg):
+            stable_count += 1
+        else:
+            stable_count = 0
+
+        if stable_count >= STABLE_COUNT_REQUIRED:
+            break
 
     send_stop(vehicle)
+    time.sleep(0.6)
+
+    final_heading = get_heading(vehicle)
+    final_delta = angle_diff_deg(final_heading, start_heading)
+    print(f"TURN LEFT done: final={final_heading:.1f} delta={final_delta:.1f}")
+
 
 # --------------------------------------------------
 # Higher-level obstacle handling
@@ -404,8 +492,8 @@ def avoid_obstacle(vehicle, lidar_ser, green, red, depth=0):
     green.off()
     red.on()
 
-    turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
-               green, red, flashing=True)
+    turn_left(vehicle, 90.0, TURN_RATE_DEG_S,
+              green, red, flashing=True, tolerance_deg=TURN_TOLERANCE_DEG)
     time.sleep(4.0)
 
     drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M, SPEED_MPS,
@@ -413,8 +501,8 @@ def avoid_obstacle(vehicle, lidar_ser, green, red, depth=0):
                   flashing=True, label="AVOID RIGHT")
     time.sleep(4.0)
 
-    turn_right(vehicle, TURN_ANGLE_DEG-7, TURN_RATE_DEG_S,
-              green, red, flashing=True)
+    turn_right(vehicle, 90.0, TURN_RATE_DEG_S,
+               green, red, flashing=True, tolerance_deg=TURN_TOLERANCE_DEG)
     time.sleep(4.0)
 
     drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M + 1, SPEED_MPS,
@@ -422,8 +510,8 @@ def avoid_obstacle(vehicle, lidar_ser, green, red, depth=0):
                   flashing=True, label="BYPASS FORWARD")
     time.sleep(4.0)
 
-    turn_right(vehicle, TURN_ANGLE_DEG-7, TURN_RATE_DEG_S,
-              green, red, flashing=True)
+    turn_right(vehicle, 90.0, TURN_RATE_DEG_S,
+               green, red, flashing=True, tolerance_deg=TURN_TOLERANCE_DEG)
     time.sleep(4.0)
 
     drive_forward(vehicle, lidar_ser, AVOIDANCE_DISTANCE_M, SPEED_MPS,
@@ -431,8 +519,8 @@ def avoid_obstacle(vehicle, lidar_ser, green, red, depth=0):
                   flashing=True, label="RETURN LEFT")
     time.sleep(4.0)
 
-    turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S,
-               green, red, flashing=True)
+    turn_left(vehicle, 90.0, TURN_RATE_DEG_S,
+              green, red, flashing=True, tolerance_deg=TURN_TOLERANCE_DEG)
     time.sleep(4.0)
 
     print(
@@ -477,7 +565,7 @@ def execute_leg(vehicle, lidar_ser, green, red, leg_distance_m, label):
         led_obstacle(green, red)
         time.sleep(0.5)
 
-        estimated_progress_m = avoid_obstacle(vehicle, lidar_ser, green, red)
+        estimated_progress_m = avoid_obstacle(vehicle, lidar_ser, green, red, depth + 1 if False else 0)
 
         remaining_m -= estimated_progress_m
         remaining_m = max(0.0, remaining_m)
@@ -537,7 +625,10 @@ def main():
             label="INITIAL DRIVE"
         )
 
-        turn_left(vehicle, TURN_ANGLE_DEG, TURN_RATE_DEG_S, green, red, flashing=True)
+        turn_left(
+            vehicle, 90.0, TURN_RATE_DEG_S,
+            green, red, flashing=True, tolerance_deg=TURN_TOLERANCE_DEG
+        )
         time.sleep(4.0)
 
         execute_leg(
