@@ -489,7 +489,7 @@ def get_dictionary_by_name(name: str) -> int:
     return getattr(aruco, name)
 
 '''Tell marker x to move up/down to align with marker y, and how much distance to move'''
-def calculate_alignment_instructions(pos1: MarkerPose, pos2: MarkerPose, tolerance: float = 50.0) -> Tuple[str, float]:
+def calculate_alignment_instructions_y(pos1: MarkerPose, pos2: MarkerPose, tolerance: float = 50.0) -> Tuple[str, float]:
     y_diff_mm = (pos2.tvec[1] - pos1.tvec[1]) * 1000.0
 
     if abs(y_diff_mm) < tolerance:
@@ -498,7 +498,17 @@ def calculate_alignment_instructions(pos1: MarkerPose, pos2: MarkerPose, toleran
         return "Move Up", y_diff_mm
     else:
         return "Move Down", -y_diff_mm
+    
+'''Tell marker x to move left/right to align with marker y, and how much distance to move'''
+def calculate_alignment_instructions_x(pos1: MarkerPose, pos2: MarkerPose, tolerance: float = 50.0) -> Tuple[str, float]:
+    x_diff_mm = (pos2.tvec[0] - pos1.tvec[0]) * 1000.0
 
+    if abs(x_diff_mm) < tolerance:
+        return "Aligned", 0.0
+    elif x_diff_mm > 0:
+        return "Move Left", x_diff_mm
+    else:
+        return "Move Right", -x_diff_mm
 
 
 def main():
@@ -547,10 +557,11 @@ def main():
                 draw_distance_overlay(display, pose_a, pose_b)
                 
                 #print the alignment instructions for marker A to align with marker B
-                instruction, amount_mm = calculate_alignment_instructions(pose_a, pose_b, TOLERANCE)
+                instruction_y, amount_mm_y = calculate_alignment_instructions_y(pose_a, pose_b, TOLERANCE)
+                instruction_x, amount_mm_x = calculate_alignment_instructions_x(pose_a, pose_b, TOLERANCE)
                 cv2.putText(
                     display,
-                    f"Alignment: {instruction} ({amount_mm:.1f} mm)",
+                    f"Alignment: {instruction_y}, {instruction_x} ({amount_mm_y:.1f}, {amount_mm_x:.1f} mm)",
                     (20, 60),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.9,
@@ -558,10 +569,14 @@ def main():
                     2,
                     cv2.LINE_AA,
                 )
-                if(instruction != "Aligned"):
-                    print(f"Move Marker {pose_a.marker_id} {instruction} by {amount_mm:.1f} mm to align with Marker {pose_b.marker_id}.", end="\r")
+                if(instruction_y != "Aligned" or instruction_x != "Aligned"):
+                    first_aligned_print = True
+                    print(f"Move Marker {pose_a.marker_id} {instruction_y}, {instruction_x} by {amount_mm_y:.1f}, {amount_mm_x:.1f} mm to align with Marker {pose_b.marker_id}.", end="\r")
                 else:
-                    print(f"Markers {pose_a.marker_id} and {pose_b.marker_id} are aligned within 500 mm.")
+                    if(first_aligned_print):
+                        print(f"Markers {pose_a.marker_id} and {pose_b.marker_id} are aligned within {TOLERANCE} mm.")
+                        first_aligned_print = False
+                    
             else:
                 cv2.putText(
                     display,
