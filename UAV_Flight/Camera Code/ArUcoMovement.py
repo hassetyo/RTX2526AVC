@@ -1,453 +1,725 @@
-from pymavlink import mavutil  # using the confirmed mavlink pattern instead of dronekit
-import time                    # for timing and sleeps
-import sys                     # for clean exits
-import math                    # for angle math
-import numpy as np             # for vector ops
-import cv2                     # for aruco detection
-import v2v_bridge              # our custom radio bridge talker
+import time          # for timing and sleeps
+import math          # for angle math
+import threading     # for running navigation in background while display runs in main thread
+import numpy as np   # for vector ops
+import cv2           # for aruco detection and display
+
+import v2v_bridge    # our custom radio bridge talker
 
 # import the camera and estimator classes from the shared aruco utility
 from ArUcoDistance import CameraInterface, ArucoDistanceEstimator
 
 # -----------------------------------------------------------------------
-# UGV VISUAL NAVIGATOR - UAV SIDE
+# UGV VISUAL NAVIGATOR  -  Camera GUI Edition
 # -----------------------------------------------------------------------
-# The drone hovers and uses its ZED 2 camera to see both:
-#   - Marker ID 5  : the ArUco tag mounted flat on top of the UGV,
-#                    with its local +Y axis aligned with the UGV's
-#                    physical forward direction.
-#   - Marker ID 0  : the stationary destination marker on the ground.
+# The script opens the ZED 2 camera and shows a live HUD displaying:
+#   - Real-time ArUco marker detection with 6-DOF axes drawn
+#   - A forward-direction arrow projected from the UGV marker (ID 5)
+#   - A line from the UGV to the destination marker (ID 0) with distance
+#   - A right-side status panel showing navigation phase, heading error,
+#     distance, last command, and a scrolling log
+#
+# Keyboard controls:
+#   S     - Start / resume navigation
+#   SPACE - Pause navigation (stops sending commands; camera keeps running)
+#   E     - Emergency stop (sends CMD_STOP to UGV via radio)
+#   Q / ESC - Quit
 #
 # Navigation logic (closed-loop visual servo):
-#   PHASE 1 - ALIGN:
-#       Compute the heading error between the UGV's current forward
-#       direction and the bearing toward the destination marker.
-#       Send CMD_TURN_ANGLE_RIGHT or CMD_TURN_ANGLE_LEFT to correct.
-#       Re-check with the camera; repeat until within ANGLE_DEADBAND.
+#   PHASE 1 - ALIGN:   Turn UGV right/left until heading error < deadband
+#   PHASE 2 - APPROACH: Drive forward, re-align between segments, until close
 #
-#   PHASE 2 - APPROACH:
-#       Compute the 3-D distance between the two markers' tvecs.
-#       Send CMD_MOVE_DIST to drive that distance.
-#       Re-check; repeat until within ARRIVAL_DIST_M.
-#
-# Coordinate system notes (important for the angle maths):
-#   The ZED 2 is assumed to be mounted on the drone looking DOWNWARD
-#   (nadir / near-nadir).  In standard OpenCV camera convention:
-#       Camera +X  →  right   (when looking down: drone right side)
-#       Camera +Y  →  down    (into the ground; depth axis is Z)
-#       Camera +Z  →  forward (optical axis pointing down toward ground)
-#   So the GROUND PLANE is spanned by Camera X and Camera Z.
-#   We use the (x, z) components of tvec as the 2-D ground position,
-#   and the (x, z) projection of R @ [0,1,0] as the UGV forward vector.
-#   If your camera is mounted differently, adjust the axis selection in
-#   ugv_forward_2d() and dest_vector_2d().
+# Coordinate system (nadir-mounted ZED 2):
+#   Camera +X = drone right  |  Camera +Y = down  |  Camera +Z = into ground
+#   Ground plane = XZ plane.  UGV forward = R @ [0,1,0] projected to (x,z).
 # -----------------------------------------------------------------------
 
-################################# config stuff i setup
+################################# config
 
-# connection settings from your working test script
-CONNECTION_STRING = "/dev/ttyACM0"  # drone wire (use COM4 if testing on windows)
-BAUD_RATE         = 57600           # using the confirmed 57600 speed
-ESP32_PORT        = "/dev/ttyUSB0"  # the radio bridge usb wire
+# hardware ports
+ESP32_PORT = "/dev/ttyUSB0"   # radio bridge USB wire to ESP32
 
 # aruco marker ids
-UGV_MARKER_ID  = 5  # the tag mounted flat on top of the UGV, +Y = UGV forward
-DEST_MARKER_ID = 0  # the stationary target marker on the ground
+UGV_MARKER_ID  = 5   # tag mounted flat on UGV, local +Y = UGV forward
+DEST_MARKER_ID = 0   # stationary target marker on the ground
 
-# aruco detection settings
+# aruco / camera settings
 ARUCO_DICT_TYPE = cv2.aruco.DICT_4X4_50  # marker dictionary (match your printed markers)
 MARKER_SIZE_M   = 0.254                  # physical side length of each printed marker, metres
 
 # navigation thresholds
 ANGLE_DEADBAND_DEG = 5.0   # stop turning when heading error is within this many degrees
-ARRIVAL_DIST_M     = 0.20  # consider UGV "arrived" when markers are this close (metres)
-MAX_SCAN_TIMEOUT   = 10.0  # max seconds to wait for both markers to appear in frame
+ARRIVAL_DIST_M     = 0.20  # consider UGV arrived when markers are this close (metres)
 
-# turn and drive speed assumptions (must match ground_station.py)
-UGV_YAW_RATE_DEG_S = 60.0  # degrees per second (from ground_station execute_turn)
-UGV_DRIVE_SPEED_MPS = 1.5  # metres per second (from ground_station SPEED_MPS)
+# ugv motion speeds (must match ground_station.py constants)
+UGV_YAW_RATE_DEG_S  = 60.0  # degrees per second from execute_turn in ground_station
+UGV_DRIVE_SPEED_MPS = 1.5   # metres per second from SPEED_MPS in ground_station
+MANOEUVRE_BUFFER_S  = 0.75  # extra wait added on top of calculated manoeuvre time
 
-# safety buffer added on top of the calculated manoeuvre time before re-checking
-MANOEUVRE_BUFFER_S = 0.75  # extra seconds to let the UGV fully settle after each move
+# display settings
+WINDOW_NAME    = "UGV Visual Navigator"
+HUD_PANEL_W    = 340        # width of the right-side status panel in pixels
+FONT           = cv2.FONT_HERSHEY_SIMPLEX
+LOG_MAX_LINES  = 12         # max scrolling log lines shown in panel
 
-# throttle settings used while the drone is in navigator mode (holding altitude)
-THROTTLE_HOVER = 1500  # rough middle ground for holding height - from working mission scripts
+# HUD colour palette (BGR)
+COL_BG         = (18,  22,  28)   # almost-black panel background
+COL_ACCENT     = (0,   220, 140)  # bright teal - primary text / UGV elements
+COL_DEST       = (30,  160, 255)  # amber-orange - destination elements
+COL_WARN       = (0,   180, 255)  # orange - warnings / active commands
+COL_ERROR      = (50,  50,  220)  # red - errors
+COL_LINE       = (0,   220, 255)  # yellow - connecting line UGV to dest
+COL_MUTED      = (100, 110, 120)  # grey - muted / inactive text
+COL_WHITE      = (235, 240, 245)  # near-white for labels
 
-# log file path
-LOG_FILE = "ugv_navigator_log.txt"
+# navigation phases (string tags used throughout)
+PHASE_IDLE        = "IDLE"
+PHASE_ALIGNING    = "ALIGNING"
+PHASE_APPROACHING = "APPROACHING"
+PHASE_ARRIVED     = "ARRIVED"
+PHASE_PAUSED      = "PAUSED"
+PHASE_ERROR       = "ERROR"
 
-############################ logging helper
+################################# shared navigation state
+# the nav thread writes here; the display thread reads here
+# everything under _lock is safe to access from either thread
 
-def log_event(text):  # writes timestamped entries to console and the log file
-    timestamp = time.strftime("%H:%M:%S")
-    line = f"[{timestamp}] {text}\n"
-    print(line.strip())
-    with open(LOG_FILE, "a") as f:
-        f.write(line)
+_lock          = threading.Lock()
+_latest_poses  = {}          # {marker_id: MarkerPose} from last detection
+_nav_phase     = PHASE_IDLE  # current navigation phase string
+_heading_error = 0.0         # degrees, positive = UGV must turn right
+_distance_m    = 0.0         # metres between the two markers
+_last_cmd_str  = "\u2014"    # human-readable description of last command sent
+_log_lines     = []          # scrolling log (newest at index 0)
+_nav_active    = False       # True while the nav thread should keep running
+_camera_matrix = None        # set after camera opens so draw helpers can use it
+_dist_coeffs   = None        # same
 
-############################ mavlink helpers (same pattern as confirmed working scripts)
 
-def change_mode(master, mode: str):  # changes the flight controller mode
-    mapping = master.mode_mapping()  # ask for the list of modes
-    if mode not in mapping:          # if the mode is fake
-        log_event(f"Unknown mode '{mode}'")  # log the error
-        return                               # bail out
-    mode_id = mapping[mode]          # find the secret mode id
-    master.mav.set_mode_send(
-        master.target_system,
-        mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-        mode_id
-    )                                        # blast it
-    log_event(f"Mode set: {mode}")           # log the change
-    time.sleep(1)                            # wait for the mode to settle
+def _log(msg):  # thread-safe log: prepends timestamp, appends to scrolling list
+    ts   = time.strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line)
+    with _lock:
+        _log_lines.insert(0, line)       # newest at top
+        del _log_lines[LOG_MAX_LINES:]   # trim old entries
 
-def set_throttle(master, pwm):  # physically pushes the throttle via rc override
-    # channel 3 is the throttle in ardupilot
-    master.mav.rc_channels_override_send(
-        master.target_system, master.target_component,
-        0, 0, pwm, 0, 0, 0, 0, 0
-    )
 
-def disarm_drone(master):  # stops the motors securely
-    master.mav.command_long_send(
-        master.target_system, master.target_component,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 0, 0, 0, 0, 0, 0
-    )
-    log_event("Disarmed.")  # log the safety
+def _set_phase(phase):  # thread-safe phase setter
+    global _nav_phase
+    with _lock:
+        _nav_phase = phase
+    _log(f"Phase -> {phase}")
 
-############################ camera & aruco helpers
 
-def open_camera():  # opens the ZED 2 camera using the shared CameraInterface class
-    log_event("[Camera] Opening ZED 2 via CameraInterface...")
-    cam = CameraInterface(
-        use_zed=True,   # use the ZED 2 SDK on the Jetson Nano
-        fps=30          # 30fps is smooth enough for this nav loop
-    )
-    log_event("[Camera] ZED 2 open OK.")
+################################# camera helpers
+
+def open_camera():  # opens the ZED 2 using the shared CameraInterface
+    _log("Opening ZED 2 camera...")
+    cam = CameraInterface(use_zed=True, fps=30)
+    _log("ZED 2 open OK.")
     return cam
 
-def build_estimator(cam):  # builds the aruco pose estimator using the camera's own intrinsics
+
+def build_estimator(cam):  # builds ArucoDistanceEstimator from ZED intrinsics
     return ArucoDistanceEstimator(
-        camera_matrix=cam.camera_matrix,    # pulled straight from the ZED SDK calibration
-        dist_coeffs=cam.dist_coeffs,        # ZED SDK distortion coefficients
-        marker_size_m=MARKER_SIZE_M,        # physical marker size for pose scaling
-        dictionary_name=ARUCO_DICT_TYPE     # must match the dictionary used to print the markers
+        camera_matrix   = cam.camera_matrix,
+        dist_coeffs     = cam.dist_coeffs,
+        marker_size_m   = MARKER_SIZE_M,
+        dictionary_name = ARUCO_DICT_TYPE
     )
 
-def scan_for_both_markers(cam, estimator):
+
+################################# navigation maths
+
+def _ugv_forward_2d(ugv_pose):
     """
-    Grabs frames until both UGV_MARKER_ID and DEST_MARKER_ID are visible,
-    or MAX_SCAN_TIMEOUT seconds pass.
-    Returns (ugv_pose, dest_pose) on success, or (None, None) on timeout.
+    Returns the UGV's current forward direction as a normalised 2D vector
+    [x, z] in camera space (ground plane = XZ for nadir camera).
+    The UGV marker's local +Y axis encodes the physical forward direction.
     """
-    scan_start = time.time()  # start the timeout clock
-    while True:
-        elapsed = time.time() - scan_start  # how long we have been waiting
-        if elapsed >= MAX_SCAN_TIMEOUT:     # if we ran out of time
-            log_event(f"[Camera] Timeout: both markers not seen in {MAX_SCAN_TIMEOUT}s")
-            return None, None              # bail with no poses
+    R, _  = cv2.Rodrigues(ugv_pose.rvec)           # rvec -> rotation matrix
+    fwd3  = R @ np.array([0.0, 1.0, 0.0])          # marker +Y in camera frame
+    fwd2  = np.array([fwd3[0], fwd3[2]])            # project to XZ ground plane
+    n     = np.linalg.norm(fwd2)
+    return fwd2 / n if n > 1e-6 else np.array([0.0, 1.0])
 
-        frame = cam.get_frame()            # grab a fresh frame from the ZED
-        if frame is None:                  # if the camera burped
-            time.sleep(0.05)               # small nap then retry
-            continue
 
-        poses = estimator.detect_markers(frame)  # run aruco detection, get all visible poses
-
-        ugv_pose  = poses.get(UGV_MARKER_ID)   # look for the UGV marker
-        dest_pose = poses.get(DEST_MARKER_ID)  # look for the destination marker
-
-        if ugv_pose is not None and dest_pose is not None:  # if both are visible
-            return ugv_pose, dest_pose                      # return the pose pair
-
-        # log a live scan ticker so we know the loop is alive
-        log_event(f"[Camera] Waiting for markers... {elapsed:.1f}s "
-                  f"| UGV={ugv_pose is not None} DEST={dest_pose is not None}")
-        time.sleep(0.05)  # ~20fps scan rate, gentle on the Nano
-
-############################ 2D navigation maths
-
-def get_ugv_forward_2d(ugv_pose):
+def _dest_vector_2d(ugv_pose, dest_pose):
     """
-    Returns the UGV's current forward direction as a 2D unit vector [x, z]
-    in camera space.
-
-    The UGV marker (ID 5) is mounted flat on the vehicle with its local
-    +Y axis aligned to the UGV's physical forward direction.
-    solvePnP gives us an rvec that encodes the rotation from marker-local
-    space into camera space, so R @ [0,1,0] is where the marker's +Y axis
-    points in camera coordinates.  We take the (x, z) components of that
-    3D vector to get the 2D ground-plane projection.
+    Returns (unit_direction [x,z], horizontal_distance_m) from UGV to
+    destination, projected onto the XZ ground plane.
     """
-    R, _ = cv2.Rodrigues(ugv_pose.rvec)       # convert rotation vector → 3x3 matrix
-    marker_y_in_cam = R @ np.array([0.0, 1.0, 0.0])  # where marker +Y lands in camera frame
+    diff   = dest_pose.tvec - ugv_pose.tvec        # 3D vector UGV -> dest
+    diff2  = np.array([diff[0], diff[2]])           # ground plane projection
+    dist2  = np.linalg.norm(diff2)
+    if dist2 < 1e-6:
+        return np.array([0.0, 1.0]), 0.0
+    return diff2 / dist2, float(dist2)
 
-    # camera ground-plane = X/Z (for nadir camera); take those two components
-    forward_xz = np.array([marker_y_in_cam[0], marker_y_in_cam[2]])  # [cam_x, cam_z]
-    norm = np.linalg.norm(forward_xz)  # magnitude for normalisation
-    if norm < 1e-6:                    # guard against a degenerate zero vector
-        return np.array([0.0, 1.0])    # fall back to "looking along cam +Z"
-    return forward_xz / norm           # normalised unit vector
 
-def get_dest_vector_2d(ugv_pose, dest_pose):
+def _heading_error_deg(ugv_fwd, dest_dir):
     """
-    Returns the direction from the UGV marker to the destination marker
-    as a 2D unit vector [x, z] in camera space (ground plane).
+    Signed angle from ugv_fwd to dest_dir (degrees).
+    Positive = turn right (CW viewed from above).
+    Negative = turn left  (CCW viewed from above).
     """
-    p_ugv  = ugv_pose.tvec   # UGV marker 3D position in camera frame (metres)
-    p_dest = dest_pose.tvec  # destination marker 3D position in camera frame
+    fx, fz = ugv_fwd
+    dx, dz = dest_dir
+    return math.degrees(math.atan2(fx * dz - fz * dx, fx * dx + fz * dz))
 
-    diff    = p_dest - p_ugv              # 3D vector UGV → destination
-    diff_xz = np.array([diff[0], diff[2]])  # project onto X/Z ground plane
-    dist_2d = np.linalg.norm(diff_xz)       # 2D horizontal distance
-    if dist_2d < 1e-6:                      # guard: already at destination
-        return np.array([0.0, 1.0]), 0.0    # dummy direction, zero distance
-    return diff_xz / dist_2d, dist_2d       # (unit direction, horizontal distance in metres)
 
-def compute_heading_error_deg(ugv_forward_2d, dest_dir_2d):
-    """
-    Computes the signed heading error in degrees between the UGV's current
-    forward direction and the direction it needs to face to reach the
-    destination marker.
-
-    Positive result → UGV must turn RIGHT (clockwise when viewed from above).
-    Negative result → UGV must turn LEFT  (counter-clockwise).
-
-    Uses the 2D cross product for sign and dot product for magnitude,
-    same maths as atan2(sin, cos) of the angle between the two vectors.
-    """
-    fx, fz = ugv_forward_2d     # UGV current forward
-    dx, dz = dest_dir_2d        # direction to destination
-
-    cross = fx * dz - fz * dx   # 2D cross product (scalar; sign = rotation sense)
-    dot   = fx * dx + fz * dz   # 2D dot product
-
-    angle_rad = math.atan2(cross, dot)   # signed angle in radians
-    return math.degrees(angle_rad)       # convert to degrees for readability
-
-def get_3d_distance(ugv_pose, dest_pose):
-    """
-    Returns the straight-line 3D distance between the two markers in metres.
-    This is the Euclidean distance of their tvec positions in camera space.
-    """
+def _3d_dist(ugv_pose, dest_pose):  # euclidean distance between tvec positions (metres)
     return float(np.linalg.norm(dest_pose.tvec - ugv_pose.tvec))
 
-############################ navigation state machine
 
-def phase_align(cam, estimator, bridge, cmd_seq_counter):
+################################# navigation thread
+
+def _nav_loop(bridge):
     """
-    PHASE 1: Turn the UGV until it faces the destination marker.
-    Returns the updated cmd_seq_counter when alignment is confirmed.
-    Raises RuntimeError if alignment cannot be achieved after many attempts.
+    Background navigation thread.
+    Reads _latest_poses, computes errors, sends v2v commands.
+    Waits for _nav_active to become True before starting.
     """
-    log_event("[NAV] === PHASE 1: ALIGN ===")
-    attempts = 0  # track how many correction turns we have sent
+    global _heading_error, _distance_m, _last_cmd_str, _nav_active
 
-    while True:  # keep correcting until we are within the deadband
-        # --- sample camera for current pose of both markers ---
-        ugv_pose, dest_pose = scan_for_both_markers(cam, estimator)
-        if ugv_pose is None:  # failed to see both markers
-            raise RuntimeError("Cannot see both markers during alignment phase.")
+    cmd_seq = 500  # start high so it does not collide with mission-4 sequence numbers
 
-        # --- compute heading error ---
-        ugv_fwd  = get_ugv_forward_2d(ugv_pose)           # UGV current forward unit vector
-        dest_dir, dist_m = get_dest_vector_2d(ugv_pose, dest_pose)  # direction + distance
-        error_deg = compute_heading_error_deg(ugv_fwd, dest_dir)     # signed error
+    def get_poses():
+        # blocks until both markers are visible or nav is paused/stopped
+        while True:
+            with _lock:
+                active = _nav_active
+                poses  = dict(_latest_poses)
+            if not active:
+                return None, None
+            ugv  = poses.get(UGV_MARKER_ID)
+            dest = poses.get(DEST_MARKER_ID)
+            if ugv and dest:
+                return ugv, dest
+            time.sleep(0.05)   # wait for detection before retrying
 
-        log_event(f"[ALIGN] Heading error: {error_deg:+.1f} deg | "
-                  f"Distance: {dist_m:.3f}m | Attempt: {attempts}")
+    def send_turn(deg, direction_right):  # helper: send a turn command and update status display
+        nonlocal cmd_seq
+        cmd_seq  += 1
+        direction = "RIGHT" if direction_right else "LEFT"
+        label     = f"TURN {direction} {deg:.0f} deg"
+        _log(f"CMD -> {label}  (seq={cmd_seq})")
+        with _lock:
+            _last_cmd_str = label
+        code = v2v_bridge.CMD_TURN_ANGLE_RIGHT if direction_right else v2v_bridge.CMD_TURN_ANGLE_LEFT
+        bridge.send_command(cmdSeq=int(round(deg)), cmd=code, estop=0)
+        wait = (deg / UGV_YAW_RATE_DEG_S) + MANOEUVRE_BUFFER_S  # calculated wait + buffer
+        _log(f"Waiting {wait:.1f}s for turn...")
+        time.sleep(wait)
 
-        # --- check if we are already close enough ---
-        if abs(error_deg) <= ANGLE_DEADBAND_DEG:  # within the deadband - we are done
-            log_event(f"[ALIGN] Heading locked. Error {error_deg:+.1f} deg is within "
-                      f"{ANGLE_DEADBAND_DEG} deg deadband.")
-            return cmd_seq_counter  # hand back the updated counter
+    def send_drive(dist_m):  # helper: send a drive command and update status display
+        nonlocal cmd_seq
+        cmd_seq  += 1
+        dist_cm   = max(1, int(round(dist_m * 100.0)))
+        label     = f"DRIVE {dist_m:.2f}m ({dist_cm}cm)"
+        _log(f"CMD -> {label}  (seq={cmd_seq})")
+        with _lock:
+            _last_cmd_str = label
+        bridge.send_command(cmdSeq=dist_cm, cmd=v2v_bridge.CMD_MOVE_DIST, estop=0)
+        wait = (dist_m / UGV_DRIVE_SPEED_MPS) + MANOEUVRE_BUFFER_S  # calculated wait + buffer
+        _log(f"Waiting {wait:.1f}s for drive...")
+        time.sleep(wait)
 
-        # --- choose direction and send turn command ---
-        angle_to_send_deg = abs(error_deg)  # always send a positive magnitude
-        cmd_seq_counter   += 1              # increment sequence so the UGV can deduplicate
+    # ------------------------------------------------------------------ #
+    # wait until the user presses S to start                             #
+    # ------------------------------------------------------------------ #
+    _log("Nav thread ready. Press S to start navigation.")
+    while True:
+        with _lock:
+            active = _nav_active
+        if active:
+            break
+        time.sleep(0.1)
 
-        if error_deg > 0:  # positive error → UGV must rotate clockwise = RIGHT
-            log_event(f"[ALIGN] Sending TURN RIGHT {angle_to_send_deg:.1f} deg  (seq={cmd_seq_counter})")
-            bridge.send_command(
-                cmdSeq=int(round(angle_to_send_deg)),  # cmdSeq carries the degrees for this command type
-                cmd=v2v_bridge.CMD_TURN_ANGLE_RIGHT,   # new command: turn right by N degrees
-                estop=0
-            )
-        else:              # negative error → UGV must rotate counter-clockwise = LEFT
-            log_event(f"[ALIGN] Sending TURN LEFT {angle_to_send_deg:.1f} deg  (seq={cmd_seq_counter})")
-            bridge.send_command(
-                cmdSeq=int(round(angle_to_send_deg)),  # cmdSeq carries the degrees for this command type
-                cmd=v2v_bridge.CMD_TURN_ANGLE_LEFT,    # new command: turn left by N degrees
-                estop=0
-            )
+    # ------------------------------------------------------------------ #
+    # PHASE 1 - ALIGN                                                     #
+    # ------------------------------------------------------------------ #
+    _set_phase(PHASE_ALIGNING)
+    _log("=== PHASE 1: ALIGN ===")
 
-        # --- wait for the UGV to complete the turn ---
-        turn_time = (angle_to_send_deg / UGV_YAW_RATE_DEG_S) + MANOEUVRE_BUFFER_S  # expected + buffer
-        log_event(f"[ALIGN] Waiting {turn_time:.1f}s for turn to complete...")
-        time.sleep(turn_time)  # give the UGV time to physically rotate
+    while True:
+        # respect pause: if nav was paused mid-alignment, hold here until resumed
+        with _lock:
+            if not _nav_active:
+                _set_phase(PHASE_PAUSED)
+                while not _nav_active:
+                    time.sleep(0.1)
+                _set_phase(PHASE_ALIGNING)
 
-        attempts += 1  # count each correction attempt
+        ugv_pose, dest_pose = get_poses()
+        if ugv_pose is None:
+            break  # navigation was stopped externally
 
-def phase_approach(cam, estimator, bridge, cmd_seq_counter):
+        fwd      = _ugv_forward_2d(ugv_pose)
+        dir2d, _ = _dest_vector_2d(ugv_pose, dest_pose)
+        err      = _heading_error_deg(fwd, dir2d)
+
+        with _lock:
+            _heading_error = err
+
+        _log(f"[ALIGN] error={err:+.1f} deg")
+
+        if abs(err) <= ANGLE_DEADBAND_DEG:   # within deadband - alignment complete
+            _log(f"[ALIGN] Locked. Error {err:+.1f} deg is within {ANGLE_DEADBAND_DEG} deg deadband.")
+            break
+
+        send_turn(abs(err), direction_right=(err > 0))
+
+    # ------------------------------------------------------------------ #
+    # PHASE 2 - APPROACH                                                  #
+    # ------------------------------------------------------------------ #
+    _set_phase(PHASE_APPROACHING)
+    _log("=== PHASE 2: APPROACH ===")
+
+    while True:
+        # respect pause: hold here if navigation was paused mid-approach
+        with _lock:
+            if not _nav_active:
+                _set_phase(PHASE_PAUSED)
+                while not _nav_active:
+                    time.sleep(0.1)
+                _set_phase(PHASE_APPROACHING)
+
+        ugv_pose, dest_pose = get_poses()
+        if ugv_pose is None:
+            break  # navigation was stopped externally
+
+        dist = _3d_dist(ugv_pose, dest_pose)
+
+        with _lock:
+            _distance_m = dist
+
+        _log(f"[APPROACH] dist={dist:.3f}m")
+
+        if dist <= ARRIVAL_DIST_M:           # close enough - arrived
+            break
+
+        send_drive(dist)                     # drive the remaining distance
+
+        # re-check alignment after each drive segment to correct heading drift
+        _log("[APPROACH] Re-checking alignment...")
+        ugv_pose, dest_pose = get_poses()
+        if ugv_pose is None:
+            break
+
+        fwd      = _ugv_forward_2d(ugv_pose)
+        dir2d, _ = _dest_vector_2d(ugv_pose, dest_pose)
+        err      = _heading_error_deg(fwd, dir2d)
+
+        with _lock:
+            _heading_error = err
+
+        if abs(err) > ANGLE_DEADBAND_DEG:    # significant drift - correct before next drive
+            _log(f"[APPROACH] Heading drifted to {err:+.1f} deg. Correcting...")
+            send_turn(abs(err), direction_right=(err > 0))
+
+    # ------------------------------------------------------------------ #
+    # DONE                                                                #
+    # ------------------------------------------------------------------ #
+    cmd_seq += 1
+    bridge.send_command(cmdSeq=cmd_seq, cmd=v2v_bridge.CMD_STOP, estop=0)  # halt UGV cleanly
+    with _lock:
+        _last_cmd_str = "STOP"
+    _set_phase(PHASE_ARRIVED)
+    _log("=== NAVIGATION COMPLETE ===")
+
+
+################################# drawing helpers
+
+def draw_ugv_forward_arrow(frame, ugv_pose, camera_matrix, dist_coeffs):
     """
-    PHASE 2: Drive the UGV forward until the UGV marker is adjacent to the
-    destination marker (within ARRIVAL_DIST_M).
-    Returns the updated cmd_seq_counter when the UGV has arrived.
-    Raises RuntimeError if arrival cannot be confirmed.
+    Projects a point 15 cm along the UGV marker's local +Y axis and draws
+    a bold green arrow from the marker centre to that projected point.
+    This arrow shows which direction the UGV is physically facing.
     """
-    log_event("[NAV] === PHASE 2: APPROACH ===")
-    attempts = 0  # track how many drive commands we have sent
+    tip_obj = np.array([[0.0, 0.15, 0.0]], dtype=np.float32)   # 15 cm along marker +Y
+    tip_px, _ = cv2.projectPoints(
+        tip_obj,
+        ugv_pose.rvec.reshape(3, 1),
+        ugv_pose.tvec.reshape(3, 1),
+        camera_matrix,
+        dist_coeffs
+    )
+    tip    = tuple(tip_px[0][0].astype(int))
+    center = ugv_pose.center_px
 
-    while True:  # keep driving until the UGV is close enough
-        # --- sample camera for current pose ---
-        ugv_pose, dest_pose = scan_for_both_markers(cam, estimator)
-        if ugv_pose is None:  # cannot see both markers
-            raise RuntimeError("Cannot see both markers during approach phase.")
+    cv2.arrowedLine(frame, center, tip, (10, 30, 10),  6, tipLength=0.35)  # dark shadow for contrast
+    cv2.arrowedLine(frame, center, tip, COL_ACCENT,    3, tipLength=0.35)  # bright teal arrow on top
 
-        dist_m = get_3d_distance(ugv_pose, dest_pose)  # straight-line distance between markers
-        log_event(f"[APPROACH] Distance: {dist_m:.3f}m | Attempt: {attempts}")
 
-        # --- check arrival condition ---
-        if dist_m <= ARRIVAL_DIST_M:  # close enough to call it done
-            log_event(f"[APPROACH] ARRIVAL CONFIRMED. Distance {dist_m:.3f}m <= {ARRIVAL_DIST_M}m threshold.")
-            return cmd_seq_counter  # navigation complete
+def draw_connecting_line(frame, ugv_pose, dest_pose, dist_m):
+    """
+    Draws a dashed line from the UGV marker centre to the destination
+    marker centre, with the distance label floating at the midpoint.
+    """
+    p1 = ugv_pose.center_px
+    p2 = dest_pose.center_px
 
-        # --- send drive command for the remaining distance ---
-        drive_dist_cm = int(round(dist_m * 100.0))  # convert metres to centimetres for the command
-        cmd_seq_counter += 1                         # increment sequence counter
+    # build dashed line by drawing alternating segments along the direction vector
+    dx         = p2[0] - p1[0]
+    dy         = p2[1] - p1[1]
+    seg_len    = 12   # pixels per dash
+    gap_len    = 8    # pixels per gap
+    total_len  = math.hypot(dx, dy)
+    if total_len < 1:
+        return
 
-        log_event(f"[APPROACH] Sending MOVE_DIST {drive_dist_cm}cm  (seq={cmd_seq_counter})")
-        bridge.send_command(
-            cmdSeq=drive_dist_cm,                  # cmdSeq carries the distance in centimetres
-            cmd=v2v_bridge.CMD_MOVE_DIST,          # new command: drive forward N centimetres
-            estop=0
-        )
+    ux   = dx / total_len   # unit direction vector
+    uy   = dy / total_len
+    pos  = 0.0
+    draw = True
 
-        # --- wait for the UGV to drive that distance ---
-        drive_time = dist_m / UGV_DRIVE_SPEED_MPS + MANOEUVRE_BUFFER_S  # expected + buffer
-        log_event(f"[APPROACH] Waiting {drive_time:.1f}s for drive to complete...")
-        time.sleep(drive_time)  # give the UGV time to physically move
+    while pos < total_len:
+        seg_end = min(pos + (seg_len if draw else gap_len), total_len)
+        if draw:
+            a = (int(p1[0] + ux * pos),     int(p1[1] + uy * pos))
+            b = (int(p1[0] + ux * seg_end), int(p1[1] + uy * seg_end))
+            cv2.line(frame, a, b, COL_LINE, 2)
+        pos  += (seg_len if draw else gap_len)
+        draw  = not draw
 
-        # re-check alignment before the next drive segment (small heading errors accumulate)
-        log_event("[APPROACH] Re-checking alignment before next drive segment...")
-        cmd_seq_counter = phase_align(cam, estimator, bridge, cmd_seq_counter)  # quick re-align
+    # distance label floating at the midpoint of the line
+    mid  = ((p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2)
+    text = f"{dist_m:.2f} m"
+    (tw, th), _ = cv2.getTextSize(text, FONT, 0.65, 2)
+    cv2.rectangle(frame,
+                  (mid[0] - tw//2 - 6, mid[1] - th - 6),
+                  (mid[0] + tw//2 + 6, mid[1] + 6),
+                  (20, 20, 20), -1)          # dark pill background
+    cv2.putText(frame, text,
+                (mid[0] - tw//2, mid[1] - 2),
+                FONT, 0.65, COL_LINE, 2, cv2.LINE_AA)
 
-        attempts += 1  # count each drive attempt
 
-############################ main entry point
+def draw_heading_arc(frame, ugv_pose, heading_err_deg):
+    """
+    Draws a small arc around the UGV marker to visualise the heading error.
+    The arc sweeps from the UGV's current forward direction by the error angle.
+    Teal = within deadband (aligned); orange = correction needed.
+    """
+    cx, cy = ugv_pose.center_px
+    radius = 45
+
+    if abs(heading_err_deg) < 0.5:   # essentially zero - skip the arc
+        return
+
+    # sweep from 270 deg (top of circle = forward reference) by the error amount
+    start_angle = -90                        # top of the circle in OpenCV convention
+    end_angle   = start_angle + heading_err_deg
+
+    colour = COL_WARN if abs(heading_err_deg) > ANGLE_DEADBAND_DEG else COL_ACCENT
+    cv2.ellipse(frame, (cx, cy), (radius, radius),
+                0, start_angle, end_angle, colour, 2)
+
+    # small dot at the arc tip to make it look like a needle
+    end_rad = math.radians(end_angle)
+    tip_x   = int(cx + radius * math.cos(end_rad))
+    tip_y   = int(cy + radius * math.sin(end_rad))
+    cv2.circle(frame, (tip_x, tip_y), 4, colour, -1)
+
+    # angle label below the arc
+    label = f"{heading_err_deg:+.1f} deg"
+    cv2.putText(frame, label,
+                (cx - 32, cy + radius + 20),
+                FONT, 0.52, colour, 1, cv2.LINE_AA)
+
+
+def draw_marker_label(frame, pose, marker_id):
+    """
+    Draws a compact ID label tag next to the marker centre.
+    UGV marker (ID 5) is tagged in teal; destination (ID 0) in amber-orange.
+    """
+    colour = COL_ACCENT if marker_id == UGV_MARKER_ID else COL_DEST
+    tag    = "UGV" if marker_id == UGV_MARKER_ID else "DEST"
+    text   = f"[{tag}] ID {marker_id}"
+    cx, cy = pose.center_px
+
+    (tw, th), _ = cv2.getTextSize(text, FONT, 0.6, 2)
+    bx = cx + 14
+    by = cy - th - 10
+    cv2.rectangle(frame, (bx - 4, by - 4), (bx + tw + 4, by + th + 6),
+                  (15, 15, 15), -1)          # dark fill
+    cv2.rectangle(frame, (bx - 4, by - 4), (bx + tw + 4, by + th + 6),
+                  colour, 1)                 # coloured border
+    cv2.putText(frame, text, (bx, by + th), FONT, 0.6, colour, 2, cv2.LINE_AA)
+
+
+def draw_hud_panel(canvas, panel_x, phase, heading_err, dist, last_cmd, log_lines, radio_ok):
+    """
+    Draws the full right-side status HUD panel onto canvas starting at panel_x.
+    """
+    h = canvas.shape[0]
+
+    # solid dark background for the whole panel
+    cv2.rectangle(canvas, (panel_x, 0), (canvas.shape[1], h), COL_BG, -1)
+
+    # thin accent separator line between camera feed and panel
+    cv2.line(canvas, (panel_x, 0), (panel_x, h), COL_ACCENT, 2)
+
+    # ---- title bar ----
+    cv2.putText(canvas, "UGV NAVIGATOR",
+                (panel_x + 14, 36), FONT, 0.72, COL_ACCENT, 2, cv2.LINE_AA)
+    cv2.line(canvas, (panel_x + 10, 48),
+             (canvas.shape[1] - 10, 48), COL_MUTED, 1)
+
+    # ---- phase badge (coloured filled pill) ----
+    phase_colours = {
+        PHASE_IDLE:        COL_MUTED,
+        PHASE_ALIGNING:    COL_WARN,
+        PHASE_APPROACHING: (0, 200, 255),
+        PHASE_ARRIVED:     COL_ACCENT,
+        PHASE_PAUSED:      COL_WARN,
+        PHASE_ERROR:       COL_ERROR,
+    }
+    p_col = phase_colours.get(phase, COL_WHITE)
+    (pw, ph), _ = cv2.getTextSize(phase, FONT, 0.72, 2)
+    bx1, by1 = panel_x + 14, 60
+    bx2, by2 = bx1 + pw + 20, by1 + ph + 14
+    cv2.rectangle(canvas, (bx1, by1), (bx2, by2), p_col, -1)
+    cv2.putText(canvas, phase, (bx1 + 10, by2 - 7),
+                FONT, 0.72, COL_BG, 2, cv2.LINE_AA)
+
+    y = by2 + 26   # running y cursor for the rest of the panel
+
+    # ---- reusable section helper ----
+    def section(label, value, value_col, yy):
+        cv2.putText(canvas, label, (panel_x + 14, yy),
+                    FONT, 0.45, COL_MUTED, 1, cv2.LINE_AA)
+        cv2.putText(canvas, value, (panel_x + 14, yy + 24),
+                    FONT, 0.75, value_col, 2, cv2.LINE_AA)
+        return yy + 52
+
+    # ---- heading error section ----
+    err_col = COL_WARN if abs(heading_err) > ANGLE_DEADBAND_DEG else COL_ACCENT
+    y = section("HEADING ERROR", f"{heading_err:+.1f} deg", err_col, y)
+
+    # ---- distance section ----
+    dist_col = COL_WARN if dist > ARRIVAL_DIST_M else COL_ACCENT
+    y = section("DISTANCE TO DEST", f"{dist:.3f} m", dist_col, y)
+
+    cv2.line(canvas, (panel_x + 10, y - 6),
+             (canvas.shape[1] - 10, y - 6), COL_MUTED, 1)
+
+    # ---- last command section ----
+    y = section("LAST COMMAND", last_cmd, COL_WHITE, y)
+
+    # ---- radio / connection status ----
+    r_col   = COL_ACCENT if radio_ok else COL_ERROR
+    r_label = "RADIO: CONNECTED" if radio_ok else "RADIO: OFFLINE"
+    cv2.putText(canvas, r_label, (panel_x + 14, y),
+                FONT, 0.5, r_col, 1, cv2.LINE_AA)
+    y += 28
+
+    # ---- marker visibility status ----
+    with _lock:
+        poses_now = dict(_latest_poses)
+
+    ugv_vis  = UGV_MARKER_ID  in poses_now
+    dest_vis = DEST_MARKER_ID in poses_now
+
+    cv2.putText(canvas,
+                f"UGV  (ID {UGV_MARKER_ID}) : {'VISIBLE' if ugv_vis  else 'NOT FOUND'}",
+                (panel_x + 14, y), FONT, 0.46,
+                COL_ACCENT if ugv_vis else COL_ERROR, 1, cv2.LINE_AA)
+    y += 22
+    cv2.putText(canvas,
+                f"DEST (ID {DEST_MARKER_ID}) : {'VISIBLE' if dest_vis else 'NOT FOUND'}",
+                (panel_x + 14, y), FONT, 0.46,
+                COL_DEST if dest_vis else COL_ERROR, 1, cv2.LINE_AA)
+    y += 32
+
+    cv2.line(canvas, (panel_x + 10, y - 6),
+             (canvas.shape[1] - 10, y - 6), COL_MUTED, 1)
+
+    # ---- scrolling log ----
+    cv2.putText(canvas, "LOG", (panel_x + 14, y + 4),
+                FONT, 0.45, COL_MUTED, 1, cv2.LINE_AA)
+    y += 22
+
+    with _lock:
+        lines = list(log_lines)
+
+    max_chars = (HUD_PANEL_W - 28) // 7   # rough character budget per line at scale 0.37
+    for line in lines:
+        if y > h - 28:
+            break
+        display = line if len(line) <= max_chars else "..." + line[-(max_chars - 3):]
+        cv2.putText(canvas, display, (panel_x + 14, y),
+                    FONT, 0.37, COL_MUTED, 1, cv2.LINE_AA)
+        y += 17
+
+    # ---- keymap footer ----
+    cv2.putText(canvas,
+                "[S] Start  [SPACE] Pause  [E] E-Stop  [Q] Quit",
+                (panel_x + 8, h - 12),
+                FONT, 0.36, COL_MUTED, 1, cv2.LINE_AA)
+
+
+################################# main
 
 def main():  # the main boss function
-    log_event("==========================================")
-    log_event("   UGV VISUAL NAVIGATOR - UAV SIDE       ")
-    log_event(f"   UGV marker: ID {UGV_MARKER_ID}       ")
-    log_event(f"   Dest marker: ID {DEST_MARKER_ID}      ")
-    log_event("==========================================")
+    global _nav_active, _latest_poses, _heading_error, _distance_m
+    global _camera_matrix, _dist_coeffs
+
+    _log("==========================================")
+    _log("   UGV VISUAL NAVIGATOR - GUI EDITION    ")
+    _log(f"   UGV marker  : ID {UGV_MARKER_ID}    ")
+    _log(f"   Dest marker : ID {DEST_MARKER_ID}   ")
+    _log("==========================================")
 
     # ------------------------------------------------------------------ #
-    # STEP 1: connect to drone mavlink                                     #
+    # open camera and build estimator                                     #
     # ------------------------------------------------------------------ #
-    log_event(f"Connecting to Drone: {CONNECTION_STRING}...")
-    master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE)  # open link
-    master.wait_heartbeat()  # wait for buzz
-    log_event("Drone Heartbeat OK.")
+    cam       = open_camera()
+    estimator = build_estimator(cam)
+
+    # store intrinsics globally so draw helpers and nav thread can use them
+    _camera_matrix = cam.camera_matrix
+    _dist_coeffs   = cam.dist_coeffs
 
     # ------------------------------------------------------------------ #
-    # STEP 2: connect to the v2v radio bridge                              #
+    # connect radio bridge (non-fatal - GUI still runs without radio)     #
     # ------------------------------------------------------------------ #
-    bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="UAV-Navigator")  # radio bridge object
+    radio_ok = False
+    bridge   = v2v_bridge.V2VBridge(ESP32_PORT, name="UAV-Navigator")
     try:
-        bridge.connect()  # open serial wire to the ESP32
-        bridge.send_message("UGV NAVIGATOR: RADIO LINK UP")  # hello over air
+        bridge.connect()
+        bridge.send_message("UGV NAVIGATOR: GUI MODE ACTIVE")
+        radio_ok = True
+        _log("Radio bridge connected.")
     except Exception as e:
-        log_event(f"Radio Bridge Fail: {e}")
-        return  # bail if no radio - cannot talk to UGV
+        _log(f"Radio bridge OFFLINE ({e}). Commands will not reach UGV.")
 
     # ------------------------------------------------------------------ #
-    # STEP 3: open ZED 2 camera and build the aruco estimator              #
+    # start the navigation background thread (paused until S pressed)    #
     # ------------------------------------------------------------------ #
-    cam = open_camera()          # opens ZED 2 using the shared CameraInterface
-    estimator = build_estimator(cam)  # creates ArucoDistanceEstimator with ZED intrinsics
+    nav_thread = threading.Thread(target=_nav_loop, args=(bridge,), daemon=True)
+    nav_thread.start()
 
-    cmd_seq_counter = 500  # start at 500 so it does not collide with mission 4 sequence numbers
+    # ------------------------------------------------------------------ #
+    # OpenCV display window setup                                         #
+    # ------------------------------------------------------------------ #
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(WINDOW_NAME, 1280 + HUD_PANEL_W, 720)
+    _log("Display ready. Press S to start navigation.")
 
-    try:
-        # -------------------------------------------------------------- #
-        # STEP 4: put the drone in STABILIZE + throttle hold while we     #
-        # run the navigation (drone should already be hovering, but we     #
-        # explicitly enter the hover loop to keep the RC override alive).  #
-        # -------------------------------------------------------------- #
-        change_mode(master, "STABILIZE")  # stabilize mode for throttle override control
-        log_event("Drone in STABILIZE hover mode. Starting UGV navigation loop.")
-        bridge.send_message("UGV NAV: STARTING APPROACH")
+    # ------------------------------------------------------------------ #
+    # main display loop                                                   #
+    # ------------------------------------------------------------------ #
+    while True:
+        # ---- grab frame from ZED 2 ----
+        frame = cam.get_frame()
+        if frame is None:
+            _log("Frame read failed - retrying...")
+            time.sleep(0.05)
+            continue
 
-        # -------------------------------------------------------------- #
-        # STEP 5: wait until both markers are visible before doing anything#
-        # -------------------------------------------------------------- #
-        log_event("[NAV] Waiting for both markers to appear in frame...")
-        ugv_pose, dest_pose = scan_for_both_markers(cam, estimator)
-        if ugv_pose is None:  # timed out without seeing both markers
-            log_event("[!] Could not see both markers. Aborting navigation.")
-            bridge.send_message("UGV NAV ABORT: MARKERS NOT FOUND")
-            return  # bail cleanly
+        # ---- detect aruco markers ----
+        poses = estimator.detect_markers(frame)
 
-        dist_initial = get_3d_distance(ugv_pose, dest_pose)  # starting distance for reference
-        log_event(f"[NAV] Both markers acquired. Initial distance: {dist_initial:.3f}m")
-        bridge.send_message(f"UGV NAV: MARKERS FOUND DIST={dist_initial:.2f}m")
+        # update shared pose state for the navigation thread to read
+        with _lock:
+            _latest_poses = dict(poses)
 
-        # -------------------------------------------------------------- #
-        # STEP 6: PHASE 1 - align the UGV toward the destination marker   #
-        # -------------------------------------------------------------- #
-        # the throttle must stay alive during navigation or the drone will crash
-        set_throttle(master, THROTTLE_HOVER)  # send initial hover pulse
-        cmd_seq_counter = phase_align(cam, estimator, bridge, cmd_seq_counter)  # do the alignment
-        log_event("[NAV] Alignment phase complete.")
-        bridge.send_message("UGV NAV: ALIGNED - STARTING DRIVE")
-        set_throttle(master, THROTTLE_HOVER)  # keep hover pulse alive after alignment phase
+        # ---- build the display canvas: camera feed + HUD panel side by side ----
+        h, w    = frame.shape[:2]
+        panel_x = w    # the HUD panel starts immediately after the camera frame
+        canvas  = np.zeros((h, w + HUD_PANEL_W, 3), dtype=np.uint8)
+        canvas[:, :w] = frame   # paste the raw camera frame on the left side
 
-        # -------------------------------------------------------------- #
-        # STEP 7: PHASE 2 - drive the UGV to the destination marker       #
-        # -------------------------------------------------------------- #
-        cmd_seq_counter = phase_approach(cam, estimator, bridge, cmd_seq_counter)  # do the drive
-        log_event("[NAV] Approach phase complete.")
-        bridge.send_message("UGV NAV: ARRIVED AT DESTINATION")
-        set_throttle(master, THROTTLE_HOVER)  # keep hover pulse alive after approach phase
+        # ---- draw ArUco axes and corner squares from ArucoDistanceEstimator ----
+        estimator.draw_markers(canvas[:, :w], poses)   # operates on camera region only
 
-        # -------------------------------------------------------------- #
-        # STEP 8: send a stop command to make sure UGV halts cleanly      #
-        # -------------------------------------------------------------- #
-        cmd_seq_counter += 1
-        bridge.send_command(cmdSeq=cmd_seq_counter, cmd=v2v_bridge.CMD_STOP, estop=0)
-        log_event("[NAV] Stop command sent to UGV. Mission complete.")
+        # ---- draw custom navigation overlays ----
+        ugv_pose  = poses.get(UGV_MARKER_ID)
+        dest_pose = poses.get(DEST_MARKER_ID)
 
-        # -------------------------------------------------------------- #
-        # STEP 9: final confirmation scan - log the achieved distance      #
-        # -------------------------------------------------------------- #
-        time.sleep(1.0)  # short pause so the UGV fully stops before we measure
-        ugv_pose_final, dest_pose_final = scan_for_both_markers(cam, estimator)
-        if ugv_pose_final is not None:
-            final_dist = get_3d_distance(ugv_pose_final, dest_pose_final)
-            log_event(f"[NAV] Final confirmed distance: {final_dist:.3f}m")
-            bridge.send_message(f"UGV NAV DONE: FINAL DIST={final_dist:.2f}m")
-        else:
-            log_event("[NAV] Final scan inconclusive (markers not visible). Mission still complete.")
+        if ugv_pose:
+            # green forward arrow showing which way the UGV is pointing
+            draw_ugv_forward_arrow(
+                canvas[:, :w], ugv_pose, _camera_matrix, _dist_coeffs
+            )
+            draw_marker_label(canvas[:, :w], ugv_pose,  UGV_MARKER_ID)
 
-    except KeyboardInterrupt:  # someone hit ctrl+c
-        log_event("[!] Emergency: User interrupt. Sending UGV stop command.")
-        bridge.send_command(cmdSeq=999, cmd=v2v_bridge.CMD_STOP, estop=1)  # emergency stop
-        change_mode(master, "LAND")  # force land mode immediately
-        set_throttle(master, 0)      # release throttle override
-        time.sleep(1)                # wait for commands to hit
+        if dest_pose:
+            draw_marker_label(canvas[:, :w], dest_pose, DEST_MARKER_ID)
 
-    except RuntimeError as e:  # navigation logic raised a hard error
-        log_event(f"[!] Navigation error: {e}")
-        bridge.send_command(cmdSeq=998, cmd=v2v_bridge.CMD_STOP, estop=1)  # safe the UGV
-        bridge.send_message(f"UGV NAV ERROR: {str(e)[:40]}")
+        if ugv_pose and dest_pose:
+            dist = _3d_dist(ugv_pose, dest_pose)
+            with _lock:
+                _distance_m = dist
 
-    finally:  # always clean up
-        cam.close()      # close the ZED camera and release resources
-        bridge.stop()    # close radio serial wire
-        log_event("Navigator finalised.")
+            # dashed line with distance label between the two markers
+            draw_connecting_line(canvas[:, :w], ugv_pose, dest_pose, dist)
+
+            # heading error arc around the UGV marker
+            fwd   = _ugv_forward_2d(ugv_pose)
+            d2d, _ = _dest_vector_2d(ugv_pose, dest_pose)
+            err   = _heading_error_deg(fwd, d2d)
+            with _lock:
+                _heading_error = err
+            draw_heading_arc(canvas[:, :w], ugv_pose, err)
+
+        # ---- draw the HUD panel on the right side ----
+        with _lock:
+            phase  = _nav_phase
+            h_err  = _heading_error
+            dist_v = _distance_m
+            last_c = _last_cmd_str
+            log_l  = list(_log_lines)
+
+        draw_hud_panel(canvas, panel_x, phase, h_err, dist_v, last_c, log_l, radio_ok)
+
+        # ---- render frame to screen ----
+        cv2.imshow(WINDOW_NAME, canvas)
+
+        # ---- keyboard input ----
+        key = cv2.waitKey(1) & 0xFF
+
+        if key in (ord('q'), 27):        # Q or ESC - quit the application
+            _log("Quit requested.")
+            with _lock:
+                _nav_active = False
+            break
+
+        elif key == ord('s'):            # S - start or resume navigation
+            with _lock:
+                already_done = _nav_phase in (PHASE_ARRIVED, PHASE_ERROR)
+            if already_done:
+                _log("Navigation already finished. Restart the script to run again.")
+            else:
+                _log("Navigation STARTED (or RESUMED).")
+                with _lock:
+                    _nav_active = True
+
+        elif key == ord(' '):            # SPACE - pause navigation
+            with _lock:
+                _nav_active = False
+            _log("Navigation PAUSED. Press S to resume.")
+
+        elif key == ord('e'):            # E - emergency stop
+            with _lock:
+                _nav_active = False
+            _log("[!] EMERGENCY STOP. Sending CMD_STOP to UGV.")
+            if radio_ok:
+                bridge.send_command(cmdSeq=999, cmd=v2v_bridge.CMD_STOP, estop=1)
+            _set_phase(PHASE_IDLE)
+
+    # ------------------------------------------------------------------ #
+    # cleanup                                                             #
+    # ------------------------------------------------------------------ #
+    cam.close()       # close ZED 2 and release camera resources
+    if radio_ok:
+        bridge.stop() # close radio serial wire cleanly
+    cv2.destroyAllWindows()
+    _log("Navigator shut down.")
+
 
 if __name__ == "__main__":  # entry point
     main()  # run it
