@@ -1,377 +1,839 @@
-import time
+#python3 ArUcoDistance_UGV_Nav.py --use-zed --ugv-marker-id 5 --dest-marker-id 0 --calibration ../calibration_chessboard.yaml --bridge-port /dev/ttyUSB0 --stop-distance-m 0.05 --drive-speed-mps 0.5 
+import argparse
 import math
-from typing import Dict, Optional
+import time
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
 
 import cv2
 import cv2.aruco as aruco
 import numpy as np
 
 import v2v_bridge
-from ArUcoDistance import CameraInterface, ArucoDistanceEstimator, MarkerPose
 
 
-# =============================================================================
-# CONFIG
-# =============================================================================
-
-# Bridge / radio
-ESP32_PORT = "/dev/ttyUSB0"
-ESP32_BAUD = 115200
-
-# Camera
-USE_ZED = True
-CAMERA_INDEX = 0
-FRAME_WIDTH = 1280
-FRAME_HEIGHT = 720
-FRAME_FPS = 30
-CALIBRATION_FILE = "calibration_chessboard.yaml"   # only used if USE_ZED=False
-
-# ArUco
-DICT_NAME = aruco.DICT_6X6_1000
-MARKER_SIZE_M = 0.10
-UGV_MARKER_ID = 5
-DEST_MARKER_ID = 0
-
-# UGV marker forward direction in marker coordinates.
-# If the printed marker's TOP points forward on the UGV, keep this as +Y.
-# If the turn logic is backwards, try [0.0, -1.0, 0.0].
-UGV_FORWARD_AXIS_MARKER = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-
-# Camera ground-plane mapping.
-# We use camera X-Z as the floor plane.
-PLANE_X_INDEX = 0
-PLANE_Y_INDEX = 2
-
-# Turn tuning
-ANGLE_TOL_DEG = 8.0
-REALIGN_ANGLE_DEG = 15.0
-TURN_STABLE_FRAMES = 5
-TURN_CMD_RESEND_SEC = 0.50
-STOP_CMD_RESEND_SEC = 0.40
-
-# Forward tuning
-FINAL_DIST_TOL_M = 0.15
-MOVE_CMD_RESEND_SEC = 0.80
-DONE_STABLE_FRAMES = 5
-
-# Movement command choice
-# Safer default: repeated 2ft steps
-USE_LONG_FORWARD_WHEN_FAR = False
-LONG_STEP_THRESHOLD_M = 2.5
-
-# Display
-WINDOW_NAME = "UAV UGV Face-and-Drive (Commands Only)"
-SHOW_WINDOW = True
-
-# Flip this if turn direction is reversed in real testing
-POSITIVE_ANGLE_MEANS_TURN_RIGHT = True
+@dataclass
+class MarkerPose:
+    marker_id: int
+    rvec: np.ndarray
+    tvec: np.ndarray
+    center_px: Tuple[int, int]
+    corners: np.ndarray
 
 
-# =============================================================================
-# MATH HELPERS
-# =============================================================================
+class CameraInterface:
+    """
+    Camera wrapper that supports:
+      1) ZED / ZED X via pyzed.sl
+      2) Standard laptop / USB camera via OpenCV
 
-def normalize_2d(v: np.ndarray) -> Optional[np.ndarray]:
-    n = np.linalg.norm(v)
-    if n < 1e-9:
+    For ZED, camera intrinsics are read from the SDK.
+    For standard camera, you can load intrinsics from a YAML file.
+    """
+
+    def __init__(
+        self,
+        use_zed: bool = False,
+        camera_index: int = 0,
+        width: int = 1280,
+        height: int = 720,
+        fps: int = 30,
+    ):
+        self.use_zed = use_zed
+        self.camera_index = camera_index
+        self.width = width
+        self.height = height
+        self.fps = fps
+
+        self.cap = None
+        self.zed = None
+        self.sl = None
+
+        self.camera_matrix = None
+        self.dist_coeffs = None
+
+        if self.use_zed:
+            self._open_zed()
+        else:
+            self._open_standard()
+
+    def _open_zed(self):
+        try:
+            import pyzed.sl as sl
+        except ImportError as e:
+            raise RuntimeError(
+                "pyzed.sl is not installed. Install the ZED SDK Python API first."
+            ) from e
+
+        self.sl = sl
+        self.zed = sl.Camera()
+
+        init_params = sl.InitParameters()
+        init_params.camera_resolution = sl.RESOLUTION.HD1080
+        init_params.camera_fps = self.fps
+        init_params.depth_mode = sl.DEPTH_MODE.NONE
+
+        err = self.zed.open(init_params)
+        if err != sl.ERROR_CODE.SUCCESS:
+            raise RuntimeError(f"Failed to open ZED camera: {err}")
+
+        cam_info = self.zed.get_camera_information()
+        calib = cam_info.camera_configuration.calibration_parameters.left_cam
+
+        self.camera_matrix = np.array(
+            [
+                [calib.fx, 0.0, calib.cx],
+                [0.0, calib.fy, calib.cy],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+
+        dist = np.array(calib.disto, dtype=np.float64).flatten()
+        if dist.size >= 5:
+            self.dist_coeffs = dist[:5].reshape(-1, 1)
+        elif dist.size > 0:
+            self.dist_coeffs = dist.reshape(-1, 1)
+        else:
+            self.dist_coeffs = np.zeros((5, 1), dtype=np.float64)
+
+    def _open_standard(self):
+        self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+        if not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(self.camera_index)
+
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Failed to open camera index {self.camera_index}")
+
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+
+    def load_standard_calibration(self, yaml_path: Optional[str]):
+        if self.use_zed:
+            return
+
+        if yaml_path:
+            fs = cv2.FileStorage(yaml_path, cv2.FILE_STORAGE_READ)
+            k = fs.getNode("K").mat()
+            d = fs.getNode("D").mat()
+            fs.release()
+
+            if k is None or d is None:
+                raise ValueError(f"Invalid calibration file: {yaml_path}")
+
+            self.camera_matrix = np.array(k, dtype=np.float64)
+            self.dist_coeffs = np.array(d, dtype=np.float64)
+            return
+
+        ret, frame = self.cap.read()
+        if not ret or frame is None:
+            w, h = self.width, self.height
+        else:
+            h, w = frame.shape[:2]
+
+        fx = float(w)
+        fy = float(w)
+        cx = float(w) / 2.0
+        cy = float(h) / 2.0
+
+        self.camera_matrix = np.array(
+            [
+                [fx, 0.0, cx],
+                [0.0, fy, cy],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        self.dist_coeffs = np.zeros((5, 1), dtype=np.float64)
+
+    def get_frame(self) -> Optional[np.ndarray]:
+        if self.use_zed:
+            return self._get_zed_frame()
+        return self._get_standard_frame()
+
+    def _get_zed_frame(self) -> Optional[np.ndarray]:
+        sl = self.sl
+        if self.zed.grab() != sl.ERROR_CODE.SUCCESS:
+            return None
+
+        image = sl.Mat()
+        self.zed.retrieve_image(image, sl.VIEW.LEFT)
+        frame = image.get_data()
+
+        if frame.shape[-1] == 4:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        else:
+            frame = frame.copy()
+
+        return frame
+
+    def _get_standard_frame(self) -> Optional[np.ndarray]:
+        ret, frame = self.cap.read()
+        if not ret:
+            return None
+        return frame
+
+    def close(self):
+        if self.use_zed and self.zed is not None:
+            self.zed.close()
+        if self.cap is not None:
+            self.cap.release()
+        cv2.destroyAllWindows()
+
+
+class ArucoDistanceEstimator:
+    def __init__(
+        self,
+        camera_matrix: np.ndarray,
+        dist_coeffs: np.ndarray,
+        marker_size_m: float,
+        dictionary_name: int = aruco.DICT_6X6_1000,
+    ):
+        self.camera_matrix = camera_matrix
+        self.dist_coeffs = dist_coeffs
+        self.marker_size_m = marker_size_m
+
+        self.aruco_dict = aruco.getPredefinedDictionary(dictionary_name)
+
+        if hasattr(aruco, "ArucoDetector"):
+            self.detector_params = aruco.DetectorParameters()
+            self.detector = aruco.ArucoDetector(self.aruco_dict, self.detector_params)
+            self.use_new_detector_api = True
+        else:
+            self.detector_params = aruco.DetectorParameters_create()
+            self.detector = None
+            self.use_new_detector_api = False
+
+    def detect_markers(self, frame: np.ndarray) -> Dict[int, MarkerPose]:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        if self.use_new_detector_api:
+            corners, ids, _ = self.detector.detectMarkers(gray)
+        else:
+            corners, ids, _ = aruco.detectMarkers(
+                gray, self.aruco_dict, parameters=self.detector_params
+            )
+
+        poses: Dict[int, MarkerPose] = {}
+
+        if ids is None or len(ids) == 0:
+            return poses
+
+        for i, marker_id in enumerate(ids.flatten()):
+            rvec, tvec = self._estimate_pose(corners[i])
+            if rvec is None or tvec is None:
+                continue
+
+            center = np.mean(corners[i][0], axis=0).astype(int)
+            poses[int(marker_id)] = MarkerPose(
+                marker_id=int(marker_id),
+                rvec=rvec,
+                tvec=tvec.reshape(3),
+                center_px=(int(center[0]), int(center[1])),
+                corners=corners[i][0],
+            )
+
+        return poses
+
+    def _estimate_pose(self, corner: np.ndarray):
+        half = self.marker_size_m / 2.0
+
+        object_points = np.array(
+            [
+                [-half, half, 0.0],
+                [half, half, 0.0],
+                [half, -half, 0.0],
+                [-half, -half, 0.0],
+            ],
+            dtype=np.float32,
+        )
+
+        image_points = corner.reshape((4, 2)).astype(np.float32)
+
+        success, rvec, tvec = cv2.solvePnP(
+            object_points,
+            image_points,
+            self.camera_matrix,
+            self.dist_coeffs,
+            flags=cv2.SOLVEPNP_IPPE_SQUARE,
+        )
+
+        if not success:
+            return None, None
+
+        return rvec, tvec
+
+    def draw_markers(self, frame: np.ndarray, poses: Dict[int, MarkerPose]):
+        if not poses:
+            return frame
+
+        corners = [pose.corners.reshape(1, 4, 2).astype(np.float32) for pose in poses.values()]
+        ids = np.array([[pose.marker_id] for pose in poses.values()], dtype=np.int32)
+
+        aruco.drawDetectedMarkers(frame, corners, ids)
+
+        for pose in poses.values():
+            cv2.drawFrameAxes(
+                frame,
+                self.camera_matrix,
+                self.dist_coeffs,
+                pose.rvec,
+                pose.tvec.reshape(3, 1),
+                self.marker_size_m * 0.5,
+            )
+
+            x, y = pose.center_px
+            cv2.circle(frame, (x, y), 5, (255, 0, 0), -1)
+            cv2.putText(
+                frame,
+                f"ID {pose.marker_id} ({x}, {y})",
+                (x + 8, y - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
+        return frame
+
+
+def pick_two_markers(
+    poses: Dict[int, MarkerPose],
+    marker1_id: Optional[int],
+    marker2_id: Optional[int],
+) -> Optional[Tuple[MarkerPose, MarkerPose]]:
+    if len(poses) < 2:
         return None
-    return v / n
+
+    if marker1_id is not None and marker2_id is not None:
+        if marker1_id in poses and marker2_id in poses:
+            return poses[marker1_id], poses[marker2_id]
+        return None
+
+    ordered_ids = sorted(poses.keys())
+    return poses[ordered_ids[0]], poses[ordered_ids[1]]
 
 
-def rotation_matrix_from_rvec(rvec: np.ndarray) -> np.ndarray:
-    rmat, _ = cv2.Rodrigues(rvec.reshape(3, 1))
-    return rmat
+def draw_crosshair(frame: np.ndarray):
+    h, w = frame.shape[:2]
+    cx, cy = w // 2, h // 2
+    cv2.line(frame, (0, cy), (w, cy), (0, 255, 0), 1)
+    cv2.line(frame, (cx, 0), (cx, h), (0, 255, 0), 1)
 
 
-def marker_forward_vector_on_ground(pose: MarkerPose) -> Optional[np.ndarray]:
-    """
-    Convert the UGV marker orientation into a 2D forward direction on the ground plane.
-    """
-    rmat = rotation_matrix_from_rvec(pose.rvec)
-    forward_cam = (rmat @ UGV_FORWARD_AXIS_MARKER.reshape(3, 1)).reshape(3)
+def draw_distance_overlay(
+    frame: np.ndarray,
+    pose_a: MarkerPose,
+    pose_b: MarkerPose,
+):
+    p1 = pose_a.tvec.reshape(3)
+    p2 = pose_b.tvec.reshape(3)
 
-    ground_vec = np.array(
-        [forward_cam[PLANE_X_INDEX], forward_cam[PLANE_Y_INDEX]],
-        dtype=np.float64,
+    diff = p2 - p1
+    dist_m = np.linalg.norm(diff)
+
+    x_diff_mm = diff[0] * 1000.0
+    y_diff_mm = diff[1] * 1000.0
+    z_diff_mm = diff[2] * 1000.0
+    dist_mm = dist_m * 1000.0
+
+    cv2.line(frame, pose_a.center_px, pose_b.center_px, (0, 255, 0), 3)
+
+    mid_x = (pose_a.center_px[0] + pose_b.center_px[0]) // 2
+    mid_y = (pose_a.center_px[1] + pose_b.center_px[1]) // 2
+
+    cv2.putText(
+        frame,
+        f"{dist_mm:.1f} mm",
+        (mid_x + 10, mid_y - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 0),
+        2,
+        cv2.LINE_AA,
     )
-    return normalize_2d(ground_vec)
+
+    lines = [
+        f"Marker A ID: {pose_a.marker_id}",
+        f"Marker B ID: {pose_b.marker_id}",
+        f"Z Diff is : {z_diff_mm:.2f} [mm]",
+        f"Y Diff is : {y_diff_mm:.2f} [mm]",
+        f"X Diff is : {x_diff_mm:.2f} [mm]",
+        f"Distance is : {dist_mm:.2f} [mm]",
+    ]
+
+    padding = 12
+    line_h = 34
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.9
+    thickness = 2
+
+    max_w = 0
+    for text in lines:
+        (tw, _), _ = cv2.getTextSize(text, font, scale, thickness)
+        max_w = max(max_w, tw)
+
+    box_w = max_w + padding * 2
+    box_h = line_h * len(lines) + padding * 2
+    x0 = 20
+    y0 = frame.shape[0] - box_h - 20
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, y0), (x0 + box_w, y0 + box_h), (255, 255, 255), -1)
+    frame[:] = cv2.addWeighted(overlay, 0.82, frame, 0.18, 0)
+
+    y = y0 + padding + 24
+    for text in lines:
+        cv2.putText(
+            frame,
+            text,
+            (x0 + padding, y),
+            font,
+            scale,
+            (0, 0, 0),
+            thickness,
+            cv2.LINE_AA,
+        )
+        y += line_h
 
 
-def ugv_to_dest_vector_on_ground(ugv_pose: MarkerPose, dest_pose: MarkerPose):
-    diff = dest_pose.tvec.reshape(3) - ugv_pose.tvec.reshape(3)
-    dx = float(diff[PLANE_X_INDEX])
-    dy = float(diff[PLANE_Y_INDEX])
-    vec = np.array([dx, dy], dtype=np.float64)
-    return vec, dx, dy
+class UGVCommander:
+    def __init__(
+        self,
+        bridge_port: str,
+        bridge_baud: int,
+        turn_threshold_deg: float,
+        stop_distance_m: float,
+        step_min_m: float,
+        step_max_m: float,
+        drive_speed_mps: float,
+        marker_timeout_sec: float,
+    ):
+        self.bridge = v2v_bridge.V2VBridge(bridge_port, baud=bridge_baud, name="UGV-Nav-Bridge")
+        self.turn_threshold_deg = turn_threshold_deg
+        self.stop_distance_m = stop_distance_m
+        self.step_min_m = step_min_m
+        self.step_max_m = step_max_m
+        self.drive_speed_mps = drive_speed_mps
+        self.marker_timeout_sec = marker_timeout_sec
+
+        self.seq = 1
+        self.arm_sent = False
+        self.last_motion = "idle"
+        self.next_drive_time = 0.0
+        self.last_seen_time = 0.0
+        self.last_status_text = "init"
+
+    def connect(self):
+        self.bridge.connect()
+        self.bridge.send_message("aruco ugv navigator online")
+
+    def close(self):
+        try:
+            self.send_stop(force=True)
+        except Exception:
+            pass
+        self.bridge.stop()
+
+    def _next_seq(self) -> int:
+        val = self.seq
+        self.seq += 1
+        return val
+
+    def ensure_armed(self):
+        if self.arm_sent:
+            return
+        print("[UGV] Sending ARM command over bridge...")
+        self.bridge.send_command(self._next_seq(), v2v_bridge.CMD_ARM, 0)
+        self.arm_sent = True
+        self.last_status_text = "arming sent"
+        time.sleep(0.25)
+
+    def send_turn_left(self):
+        if self.last_motion == "turn_left":
+            return
+        print("[UGV] TURN LEFT")
+        self.bridge.send_command(self._next_seq(), v2v_bridge.CMD_TURN_LEFT, 0)
+        self.last_motion = "turn_left"
+        self.last_status_text = "turning left"
+
+    def send_turn_right(self):
+        if self.last_motion == "turn_right":
+            return
+        print("[UGV] TURN RIGHT")
+        self.bridge.send_command(self._next_seq(), v2v_bridge.CMD_TURN_RIGHT, 0)
+        self.last_motion = "turn_right"
+        self.last_status_text = "turning right"
+
+    def send_stop(self, force: bool = False):
+        if not force and self.last_motion == "stopped":
+            return
+        print("[UGV] STOP")
+        self.bridge.send_command(self._next_seq(), v2v_bridge.CMD_STOP, 0)
+        self.last_motion = "stopped"
+        self.last_status_text = "stopped"
+
+    def send_forward_step(self, step_m: float):
+        now = time.time()
+        if now < self.next_drive_time:
+            return
+
+        step_m = max(self.step_min_m, min(step_m, self.step_max_m))
+        duration = max(step_m / max(self.drive_speed_mps, 1e-6), 0.15)
+        margin = 0.25
+
+        print(f"[UGV] FORWARD STEP {step_m:.3f} m")
+        self.bridge.send_message(f"GOTO:{step_m:.3f},0")
+        self.last_motion = "forward"
+        self.last_status_text = f"forward {step_m:.2f} m"
+        self.next_drive_time = now + duration + margin
+
+    def handle_marker_loss(self):
+        now = time.time()
+        if self.last_seen_time <= 0.0:
+            return
+        if (now - self.last_seen_time) > self.marker_timeout_sec:
+            self.send_stop()
+            self.last_status_text = "marker lost -> stopped"
 
 
-def signed_angle_deg(v_from: np.ndarray, v_to: np.ndarray) -> float:
-    a = normalize_2d(v_from)
-    b = normalize_2d(v_to)
-    if a is None or b is None:
+FORWARD_AXIS_MAP = {
+    "+x": np.array([1.0, 0.0, 0.0], dtype=np.float64),
+    "-x": np.array([-1.0, 0.0, 0.0], dtype=np.float64),
+    "+y": np.array([0.0, 1.0, 0.0], dtype=np.float64),
+    "-y": np.array([0.0, -1.0, 0.0], dtype=np.float64),
+}
+
+
+def get_marker_forward_direction_px(
+    pose: MarkerPose,
+    camera_matrix: np.ndarray,
+    dist_coeffs: np.ndarray,
+    marker_size_m: float,
+    forward_axis_name: str,
+) -> Optional[np.ndarray]:
+    axis = FORWARD_AXIS_MAP[forward_axis_name]
+    tip_local = axis * (marker_size_m * 0.75)
+
+    pts3d = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            tip_local,
+        ],
+        dtype=np.float32,
+    )
+
+    img_pts, _ = cv2.projectPoints(
+        pts3d,
+        pose.rvec,
+        pose.tvec.reshape(3, 1),
+        camera_matrix,
+        dist_coeffs,
+    )
+    img_pts = img_pts.reshape(-1, 2)
+
+    center = img_pts[0]
+    tip = img_pts[1]
+    direction = tip - center
+
+    if np.linalg.norm(direction) < 1e-6:
+        return None
+    return direction
+
+
+def signed_angle_deg(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
+    a = np.asarray(vec_a, dtype=np.float64).reshape(2)
+    b = np.asarray(vec_b, dtype=np.float64).reshape(2)
+
+    na = np.linalg.norm(a)
+    nb = np.linalg.norm(b)
+    if na < 1e-9 or nb < 1e-9:
         return 0.0
 
-    cross = a[0] * b[1] - a[1] * b[0]
+    a /= na
+    b /= nb
+
     dot = float(np.clip(np.dot(a, b), -1.0, 1.0))
+    cross = float(a[0] * b[1] - a[1] * b[0])
     return math.degrees(math.atan2(cross, dot))
 
 
-def choose_turn_cmd(angle_deg: float) -> int:
-    if POSITIVE_ANGLE_MEANS_TURN_RIGHT:
-        return v2v_bridge.CMD_TURN_RIGHT if angle_deg > 0 else v2v_bridge.CMD_TURN_LEFT
-    return v2v_bridge.CMD_TURN_LEFT if angle_deg > 0 else v2v_bridge.CMD_TURN_RIGHT
-
-
-def choose_forward_cmd(dist_m: float) -> int:
-    if USE_LONG_FORWARD_WHEN_FAR and dist_m >= LONG_STEP_THRESHOLD_M:
-        return v2v_bridge.CMD_MOVE_FORWARD
-    return v2v_bridge.CMD_MOVE_2FT
-
-
-# =============================================================================
-# DISPLAY
-# =============================================================================
-
-def draw_overlay(
+def draw_nav_overlay(
     frame: np.ndarray,
-    estimator: ArucoDistanceEstimator,
-    poses: Dict[int, MarkerPose],
-    phase: str,
-    status: str,
-    dist_m: Optional[float],
-    heading_err_deg: Optional[float],
+    ugv_pose: MarkerPose,
+    dest_pose: MarkerPose,
+    heading_error_deg: float,
+    status_text: str,
+    stop_distance_m: float,
+    camera_matrix: np.ndarray,
+    dist_coeffs: np.ndarray,
+    marker_size_m: float,
+    forward_axis_name: str,
 ):
-    out = frame.copy()
-    out = estimator.draw_markers(out, poses)
+    ugv_center = np.array(ugv_pose.center_px, dtype=np.int32)
+    dst_center = np.array(dest_pose.center_px, dtype=np.int32)
 
-    ugv_pose = poses.get(UGV_MARKER_ID)
-    dest_pose = poses.get(DEST_MARKER_ID)
-
-    if ugv_pose is not None and dest_pose is not None:
-        cv2.line(out, ugv_pose.center_px, dest_pose.center_px, (0, 255, 255), 2)
-
-        fwd = marker_forward_vector_on_ground(ugv_pose)
-        if fwd is not None:
-            cx, cy = ugv_pose.center_px
-            end_pt = (int(cx + fwd[0] * 120), int(cy + fwd[1] * 120))
-            cv2.arrowedLine(out, (cx, cy), end_pt, (255, 0, 255), 3, tipLength=0.2)
-
-    lines = [
-        f"Phase: {phase}",
-        status,
-        f"UGV={UGV_MARKER_ID} DEST={DEST_MARKER_ID}",
-        f"distance={dist_m:.3f} m" if dist_m is not None else "distance=---",
-        f"heading_err={heading_err_deg:.2f} deg" if heading_err_deg is not None else "heading_err=---",
-    ]
-
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.65
-    thick = 2
-    pad = 10
-    line_h = 28
-
-    max_w = 0
-    for line in lines:
-        (tw, _), _ = cv2.getTextSize(line, font, scale, thick)
-        max_w = max(max_w, tw)
-
-    box_w = max_w + pad * 2
-    box_h = len(lines) * line_h + pad * 2
-
-    overlay = out.copy()
-    cv2.rectangle(overlay, (10, 10), (10 + box_w, 10 + box_h), (0, 0, 0), -1)
-    out = cv2.addWeighted(overlay, 0.55, out, 0.45, 0)
-
-    y = 10 + pad + 20
-    for line in lines:
-        cv2.putText(out, line, (20, y), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
-        y += line_h
-
-    return out
-
-
-# =============================================================================
-# MAIN
-# =============================================================================
-
-def main():
-    print("===================================================")
-    print(" UAV UGV FACE-AND-DRIVE (COMMANDS ONLY)")
-    print(" Marker 5 turns to face marker 0, then advances")
-    print(" using only existing movement commands")
-    print("===================================================")
-    print("Press q to quit.\n")
-
-    cam = CameraInterface(
-        use_zed=USE_ZED,
-        camera_index=CAMERA_INDEX,
-        width=FRAME_WIDTH,
-        height=FRAME_HEIGHT,
-        fps=FRAME_FPS,
+    fwd_dir = get_marker_forward_direction_px(
+        ugv_pose,
+        camera_matrix,
+        dist_coeffs,
+        marker_size_m,
+        forward_axis_name,
     )
 
-    if not USE_ZED:
-        cam.load_standard_calibration(CALIBRATION_FILE)
+    cv2.arrowedLine(
+        frame,
+        tuple(ugv_center),
+        tuple(dst_center),
+        (0, 255, 255),
+        2,
+        tipLength=0.08,
+    )
+
+    if fwd_dir is not None:
+        fwd_tip = ugv_center + np.round(fwd_dir).astype(np.int32)
+        cv2.arrowedLine(
+            frame,
+            tuple(ugv_center),
+            tuple(fwd_tip),
+            (255, 0, 255),
+            2,
+            tipLength=0.18,
+        )
+
+    diff = dest_pose.tvec.reshape(3) - ugv_pose.tvec.reshape(3)
+    dist_m = float(np.linalg.norm(diff))
+
+    lines = [
+        f"UGV ID: {ugv_pose.marker_id}",
+        f"DEST ID: {dest_pose.marker_id}",
+        f"Heading error: {heading_error_deg:+.1f} deg",
+        f"Distance: {dist_m:.3f} m",
+        f"Stop dist: {stop_distance_m:.3f} m",
+        f"State: {status_text}",
+    ]
+
+    x0, y0 = 20, 20
+    padding = 10
+    line_h = 28
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.7
+    thickness = 2
+
+    max_w = 0
+    for text in lines:
+        (tw, _), _ = cv2.getTextSize(text, font, scale, thickness)
+        max_w = max(max_w, tw)
+
+    box_w = max_w + 2 * padding
+    box_h = len(lines) * line_h + 2 * padding
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, y0), (x0 + box_w, y0 + box_h), (255, 255, 255), -1)
+    frame[:] = cv2.addWeighted(overlay, 0.82, frame, 0.18, 0)
+
+    y = y0 + padding + 20
+    for text in lines:
+        cv2.putText(
+            frame,
+            text,
+            (x0 + padding, y),
+            font,
+            scale,
+            (0, 0, 0),
+            thickness,
+            cv2.LINE_AA,
+        )
+        y += line_h
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Measure ArUco marker distance and command the ground vehicle marker to drive toward the destination marker."
+        )
+    )
+    parser.add_argument("--use-zed", action="store_true", help="Use Stereolabs ZED / ZED X camera.")
+    parser.add_argument("--camera-index", type=int, default=0, help="Standard camera index for laptop/USB webcam.")
+    parser.add_argument("--calibration", type=str, default=None, help="YAML calibration file for standard camera with nodes K and D.")
+    parser.add_argument("--marker-size", type=float, default=0.254, help="Marker size in meters. Example: 0.254 for 10 inches.")
+    parser.add_argument("--ugv-marker-id", type=int, default=5, help="ArUco ID attached to the ground vehicle.")
+    parser.add_argument("--dest-marker-id", type=int, default=0, help="Destination ArUco ID.")
+    parser.add_argument("--dict", type=str, default="DICT_6X6_1000", help="ArUco dictionary name.")
+    parser.add_argument("--width", type=int, default=1280, help="Standard camera width.")
+    parser.add_argument("--height", type=int, default=720, help="Standard camera height.")
+    parser.add_argument("--fps", type=int, default=30, help="Camera FPS.")
+
+    parser.add_argument("--bridge-port", type=str, default="/dev/ttyUSB0", help="Local ESP32 bridge serial port used to send commands.")
+    parser.add_argument("--bridge-baud", type=int, default=115200, help="ESP32 bridge baud rate.")
+
+    parser.add_argument("--turn-threshold-deg", type=float, default=12.0, help="Heading error magnitude required before issuing turn commands.")
+    parser.add_argument("--stop-distance-m", type=float, default=0.28, help="Distance at which the UGV is considered to have reached the destination.")
+    parser.add_argument("--step-min-m", type=float, default=0.20, help="Minimum forward body step to command.")
+    parser.add_argument("--step-max-m", type=float, default=0.60, help="Maximum forward body step to command.")
+    parser.add_argument("--drive-speed-mps", type=float, default=1.5, help="Expected ground-station forward speed used only for cooldown timing.")
+    parser.add_argument("--marker-timeout-sec", type=float, default=0.75, help="Stop the UGV if markers disappear longer than this timeout.")
+    parser.add_argument(
+        "--ugv-forward-axis",
+        choices=["+x", "-x", "+y", "-y"],
+        default="+y",
+        help="Which marker local axis points in the UGV forward direction.",
+    )
+    return parser.parse_args()
+
+
+def get_dictionary_by_name(name: str) -> int:
+    if not hasattr(aruco, name):
+        valid = [x for x in dir(aruco) if x.startswith("DICT_")]
+        raise ValueError(f"Unknown dictionary '{name}'. Valid examples: {valid[:10]}")
+    return getattr(aruco, name)
+
+
+def main():
+    args = parse_args()
+    dictionary = get_dictionary_by_name(args.dict)
+
+    cam = CameraInterface(
+        use_zed=args.use_zed,
+        camera_index=args.camera_index,
+        width=args.width,
+        height=args.height,
+        fps=args.fps,
+    )
+
+    if not args.use_zed:
+        cam.load_standard_calibration(args.calibration)
 
     estimator = ArucoDistanceEstimator(
         camera_matrix=cam.camera_matrix,
         dist_coeffs=cam.dist_coeffs,
-        marker_size_m=MARKER_SIZE_M,
-        dictionary_name=DICT_NAME,
+        marker_size_m=args.marker_size,
+        dictionary_name=dictionary,
     )
 
-    bridge = v2v_bridge.V2VBridge(ESP32_PORT, baud=ESP32_BAUD, name="UAV-Bridge")
-    bridge.connect()
-    bridge.send_message("ugv face-and-drive cmds-only live")
+    commander = UGVCommander(
+        bridge_port=args.bridge_port,
+        bridge_baud=args.bridge_baud,
+        turn_threshold_deg=args.turn_threshold_deg,
+        stop_distance_m=args.stop_distance_m,
+        step_min_m=args.step_min_m,
+        step_max_m=args.step_max_m,
+        drive_speed_mps=args.drive_speed_mps,
+        marker_timeout_sec=args.marker_timeout_sec,
+    )
+    commander.connect()
 
-    if SHOW_WINDOW:
-        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(WINDOW_NAME, FRAME_WIDTH, FRAME_HEIGHT)
-
-    phase = "SEARCH"
-    status = "Waiting for marker 5 and marker 0"
-    cmd_seq = 400
-
-    turn_stable = 0
-    done_stable = 0
-    last_turn_cmd_time = 0.0
-    last_stop_cmd_time = 0.0
-    last_move_cmd_time = 0.0
-    current_turn_cmd = None
+    print("Press q to quit.")
+    print("Press s to save a screenshot.")
+    print(
+        f"Tracking UGV marker {args.ugv_marker_id} toward destination marker {args.dest_marker_id}."
+    )
 
     try:
         while True:
             frame = cam.get_frame()
             if frame is None:
-                blank = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
-                shown = draw_overlay(blank, estimator, {}, phase, "No camera frame", None, None)
-                if SHOW_WINDOW:
-                    cv2.imshow(WINDOW_NAME, shown)
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        break
+                print("Failed to read frame.")
+                commander.handle_marker_loss()
                 continue
 
             poses = estimator.detect_markers(frame)
-            ugv_pose = poses.get(UGV_MARKER_ID)
-            dest_pose = poses.get(DEST_MARKER_ID)
+            display = frame.copy()
 
-            dist_m = None
-            heading_err_deg = None
+            draw_crosshair(display)
+            estimator.draw_markers(display, poses)
 
-            if ugv_pose is not None and dest_pose is not None:
-                target_vec, _, _ = ugv_to_dest_vector_on_ground(ugv_pose, dest_pose)
-                dist_m = float(np.linalg.norm(target_vec))
+            pair = pick_two_markers(poses, args.ugv_marker_id, args.dest_marker_id)
+            if pair is not None:
+                ugv_pose, dest_pose = pair
+                commander.last_seen_time = time.time()
+                commander.ensure_armed()
 
-                ugv_fwd = marker_forward_vector_on_ground(ugv_pose)
-                target_dir = normalize_2d(target_vec)
+                draw_distance_overlay(display, ugv_pose, dest_pose)
 
-                if ugv_fwd is not None and target_dir is not None:
-                    heading_err_deg = signed_angle_deg(ugv_fwd, target_dir)
+                forward_dir = get_marker_forward_direction_px(
+                    ugv_pose,
+                    cam.camera_matrix,
+                    cam.dist_coeffs,
+                    args.marker_size,
+                    args.ugv_forward_axis,
+                )
+                target_dir = np.array(
+                    [
+                        dest_pose.center_px[0] - ugv_pose.center_px[0],
+                        dest_pose.center_px[1] - ugv_pose.center_px[1],
+                    ],
+                    dtype=np.float64,
+                )
+                heading_error_deg = signed_angle_deg(forward_dir if forward_dir is not None else target_dir, target_dir)
+                dist_m = float(np.linalg.norm(dest_pose.tvec.reshape(3) - ugv_pose.tvec.reshape(3)))
 
-            # -------------------------------------------------------------
-            # SEARCH
-            # -------------------------------------------------------------
-            if phase == "SEARCH":
-                if ugv_pose is not None and dest_pose is not None and heading_err_deg is not None:
-                    phase = "TURN_TO_FACE"
-                    status = "Both markers visible. Turning to face destination."
-                else:
-                    status = "Need both markers visible"
-
-            # -------------------------------------------------------------
-            # TURN_TO_FACE
-            # -------------------------------------------------------------
-            elif phase == "TURN_TO_FACE":
-                if ugv_pose is None or dest_pose is None or heading_err_deg is None:
-                    turn_stable = 0
-                    status = "Lost marker 5 or marker 0 during turn"
-
-                    if current_turn_cmd is not None and (time.time() - last_stop_cmd_time) >= STOP_CMD_RESEND_SEC:
-                        bridge.send_command(cmdSeq=cmd_seq, cmd=v2v_bridge.CMD_STOP, estop=0)
-                        cmd_seq += 1
-                        last_stop_cmd_time = time.time()
-                        current_turn_cmd = None
-                else:
-                    if abs(heading_err_deg) <= ANGLE_TOL_DEG:
-                        turn_stable += 1
-                        status = f"Facing destination ({turn_stable}/{TURN_STABLE_FRAMES})"
-
-                        if current_turn_cmd is not None and (time.time() - last_stop_cmd_time) >= STOP_CMD_RESEND_SEC:
-                            bridge.send_command(cmdSeq=cmd_seq, cmd=v2v_bridge.CMD_STOP, estop=0)
-                            cmd_seq += 1
-                            last_stop_cmd_time = time.time()
-                            current_turn_cmd = None
-
-                        if turn_stable >= TURN_STABLE_FRAMES:
-                            phase = "DRIVE_FORWARD"
-                            turn_stable = 0
-                            status = "Turn complete. Driving forward."
+                if dist_m <= args.stop_distance_m:
+                    commander.send_stop()
+                    commander.last_status_text = "destination reached"
+                elif abs(heading_error_deg) > args.turn_threshold_deg:
+                    if heading_error_deg > 0.0:
+                        commander.send_turn_right()
                     else:
-                        turn_stable = 0
-                        wanted_cmd = choose_turn_cmd(heading_err_deg)
-                        status = f"Turning. Heading error = {heading_err_deg:.2f} deg"
-
-                        if current_turn_cmd != wanted_cmd or (time.time() - last_turn_cmd_time) >= TURN_CMD_RESEND_SEC:
-                            bridge.send_command(cmdSeq=cmd_seq, cmd=wanted_cmd, estop=0)
-                            cmd_seq += 1
-                            current_turn_cmd = wanted_cmd
-                            last_turn_cmd_time = time.time()
-
-            # -------------------------------------------------------------
-            # DRIVE_FORWARD
-            # -------------------------------------------------------------
-            elif phase == "DRIVE_FORWARD":
-                if ugv_pose is None or dest_pose is None or dist_m is None:
-                    done_stable = 0
-                    status = "Lost marker 5 or marker 0 during forward drive"
+                        commander.send_turn_left()
                 else:
-                    if heading_err_deg is not None and abs(heading_err_deg) > REALIGN_ANGLE_DEG:
-                        phase = "TURN_TO_FACE"
-                        status = "Heading drifted. Re-aligning."
-                    elif dist_m <= FINAL_DIST_TOL_M:
-                        done_stable += 1
-                        status = f"At destination ({done_stable}/{DONE_STABLE_FRAMES})"
+                    if commander.last_motion in ("turn_left", "turn_right"):
+                        commander.send_stop()
+                        time.sleep(0.15)
 
-                        if done_stable >= DONE_STABLE_FRAMES:
-                            bridge.send_command(cmdSeq=cmd_seq, cmd=v2v_bridge.CMD_STOP, estop=0)
-                            cmd_seq += 1
-                            phase = "DONE"
-                            status = "UGV marker is next to destination marker"
-                    else:
-                        done_stable = 0
-                        move_cmd = choose_forward_cmd(dist_m)
-                        move_name = "MOVE_FORWARD" if move_cmd == v2v_bridge.CMD_MOVE_FORWARD else "MOVE_2FT"
-                        status = f"Driving forward with {move_name}. Remaining distance = {dist_m:.3f} m"
+                    remaining = max(0.0, dist_m - args.stop_distance_m)
+                    step_m = max(args.step_min_m, min(remaining * 0.5, args.step_max_m))
+                    commander.send_forward_step(step_m)
 
-                        if (time.time() - last_move_cmd_time) >= MOVE_CMD_RESEND_SEC:
-                            bridge.send_command(cmdSeq=cmd_seq, cmd=move_cmd, estop=0)
-                            cmd_seq += 1
-                            last_move_cmd_time = time.time()
+                draw_nav_overlay(
+                    display,
+                    ugv_pose,
+                    dest_pose,
+                    heading_error_deg,
+                    commander.last_status_text,
+                    args.stop_distance_m,
+                    cam.camera_matrix,
+                    cam.dist_coeffs,
+                    args.marker_size,
+                    args.ugv_forward_axis,
+                )
+            else:
+                commander.handle_marker_loss()
+                cv2.putText(
+                    display,
+                    f"Need markers {args.ugv_marker_id} and {args.dest_marker_id}",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    display,
+                    f"State: {commander.last_status_text}",
+                    (20, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
 
-            elif phase == "DONE":
-                status = "Finished. Press q to quit."
+            cv2.imshow("ArUco Distance + UGV Navigation", display)
 
-            shown = draw_overlay(frame, estimator, poses, phase, status, dist_m, heading_err_deg)
-
-            if SHOW_WINDOW:
-                cv2.imshow(WINDOW_NAME, shown)
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord("q"):
-                    break
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                break
+            elif key == ord("s"):
+                cv2.imwrite("aruco_distance_ugv_nav_screenshot.png", display)
+                print("Saved: aruco_distance_ugv_nav_screenshot.png")
 
     finally:
-        try:
-            bridge.send_command(cmdSeq=cmd_seq, cmd=v2v_bridge.CMD_STOP, estop=0)
-        except Exception:
-            pass
-
-        try:
-            bridge.stop()
-        except Exception:
-            pass
-
+        commander.close()
         cam.close()
-        print("UAV commands-only script closed.")
 
 
 if __name__ == "__main__":
