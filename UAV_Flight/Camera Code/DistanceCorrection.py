@@ -36,7 +36,7 @@ class CameraInterface:
         camera_index: int = 0,
         width: int = 1280,
         height: int = 720,
-        fps: int = 30,
+        fps: int = 60,
     ):
         self.use_zed = use_zed
         self.camera_index = camera_index
