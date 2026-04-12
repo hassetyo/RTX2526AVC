@@ -14,7 +14,7 @@ from ArUcoDistance import CameraInterface, ArucoDistanceEstimator, MarkerPose
 # CONFIG
 # =============================================================================
 
-# Radio / bridge
+# Bridge / radio
 ESP32_PORT = "/dev/ttyUSB0"
 ESP32_BAUD = 115200
 
@@ -32,34 +32,38 @@ MARKER_SIZE_M = 0.10
 UGV_MARKER_ID = 5
 DEST_MARKER_ID = 0
 
-# The printed marker on the UGV faces forward.
-# +Y here means "top of the printed marker" is forward.
-# If the UGV turns the wrong way or the heading looks backwards,
-# change this to np.array([0.0, -1.0, 0.0], dtype=np.float64)
+# UGV marker forward direction in marker coordinates.
+# If the printed marker's TOP points forward on the UGV, keep this as +Y.
+# If the turn logic is backwards, try [0.0, -1.0, 0.0].
 UGV_FORWARD_AXIS_MARKER = np.array([0.0, 1.0, 0.0], dtype=np.float64)
 
-# Camera-ground-plane mapping.
-# We use camera X-Z as the 2D floor plane.
+# Camera ground-plane mapping.
+# We use camera X-Z as the floor plane.
 PLANE_X_INDEX = 0
 PLANE_Y_INDEX = 2
 
-# Turning behavior
+# Turn tuning
 ANGLE_TOL_DEG = 8.0
+REALIGN_ANGLE_DEG = 15.0
 TURN_STABLE_FRAMES = 5
-TURN_CMD_RESEND_SEC = 0.5
-STOP_CMD_RESEND_SEC = 0.4
+TURN_CMD_RESEND_SEC = 0.50
+STOP_CMD_RESEND_SEC = 0.40
 
-# Forward behavior
-FINAL_DIST_TOL_M = 0.12
-FORWARD_STEP_M = 0.30
-FORWARD_CMD_RESEND_SEC = 1.0
+# Forward tuning
+FINAL_DIST_TOL_M = 0.15
+MOVE_CMD_RESEND_SEC = 0.80
 DONE_STABLE_FRAMES = 5
 
-# Search / display
-WINDOW_NAME = "UAV UGV Face-and-Drive"
+# Movement command choice
+# Safer default: repeated 2ft steps
+USE_LONG_FORWARD_WHEN_FAR = False
+LONG_STEP_THRESHOLD_M = 2.5
+
+# Display
+WINDOW_NAME = "UAV UGV Face-and-Drive (Commands Only)"
 SHOW_WINDOW = True
 
-# If the vehicle turns the wrong way, flip this boolean
+# Flip this if turn direction is reversed in real testing
 POSITIVE_ANGLE_MEANS_TURN_RIGHT = True
 
 
@@ -81,7 +85,7 @@ def rotation_matrix_from_rvec(rvec: np.ndarray) -> np.ndarray:
 
 def marker_forward_vector_on_ground(pose: MarkerPose) -> Optional[np.ndarray]:
     """
-    Convert the UGV marker's orientation into a 2D forward direction on the ground plane.
+    Convert the UGV marker orientation into a 2D forward direction on the ground plane.
     """
     rmat = rotation_matrix_from_rvec(pose.rvec)
     forward_cam = (rmat @ UGV_FORWARD_AXIS_MARKER.reshape(3, 1)).reshape(3)
@@ -102,9 +106,6 @@ def ugv_to_dest_vector_on_ground(ugv_pose: MarkerPose, dest_pose: MarkerPose):
 
 
 def signed_angle_deg(v_from: np.ndarray, v_to: np.ndarray) -> float:
-    """
-    Signed angle from v_from to v_to in the 2D ground plane.
-    """
     a = normalize_2d(v_from)
     b = normalize_2d(v_to)
     if a is None or b is None:
@@ -119,6 +120,12 @@ def choose_turn_cmd(angle_deg: float) -> int:
     if POSITIVE_ANGLE_MEANS_TURN_RIGHT:
         return v2v_bridge.CMD_TURN_RIGHT if angle_deg > 0 else v2v_bridge.CMD_TURN_LEFT
     return v2v_bridge.CMD_TURN_LEFT if angle_deg > 0 else v2v_bridge.CMD_TURN_RIGHT
+
+
+def choose_forward_cmd(dist_m: float) -> int:
+    if USE_LONG_FORWARD_WHEN_FAR and dist_m >= LONG_STEP_THRESHOLD_M:
+        return v2v_bridge.CMD_MOVE_FORWARD
+    return v2v_bridge.CMD_MOVE_2FT
 
 
 # =============================================================================
@@ -146,7 +153,6 @@ def draw_overlay(
         fwd = marker_forward_vector_on_ground(ugv_pose)
         if fwd is not None:
             cx, cy = ugv_pose.center_px
-            # simple display arrow
             end_pt = (int(cx + fwd[0] * 120), int(cy + fwd[1] * 120))
             cv2.arrowedLine(out, (cx, cy), end_pt, (255, 0, 255), 3, tipLength=0.2)
 
@@ -190,9 +196,9 @@ def draw_overlay(
 
 def main():
     print("===================================================")
-    print(" UAV UGV FACE-AND-DRIVE")
-    print(" Marker 5 turns to face marker 0, then drives forward")
-    print(" until marker 5 is next to marker 0")
+    print(" UAV UGV FACE-AND-DRIVE (COMMANDS ONLY)")
+    print(" Marker 5 turns to face marker 0, then advances")
+    print(" using only existing movement commands")
     print("===================================================")
     print("Press q to quit.\n")
 
@@ -216,7 +222,7 @@ def main():
 
     bridge = v2v_bridge.V2VBridge(ESP32_PORT, baud=ESP32_BAUD, name="UAV-Bridge")
     bridge.connect()
-    bridge.send_message("ugv face-and-drive live")
+    bridge.send_message("ugv face-and-drive cmds-only live")
 
     if SHOW_WINDOW:
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
@@ -224,13 +230,13 @@ def main():
 
     phase = "SEARCH"
     status = "Waiting for marker 5 and marker 0"
-    cmd_seq = 300
+    cmd_seq = 400
 
     turn_stable = 0
     done_stable = 0
     last_turn_cmd_time = 0.0
     last_stop_cmd_time = 0.0
-    last_forward_cmd_time = 0.0
+    last_move_cmd_time = 0.0
     current_turn_cmd = None
 
     try:
@@ -319,10 +325,9 @@ def main():
                     done_stable = 0
                     status = "Lost marker 5 or marker 0 during forward drive"
                 else:
-                    # optional small heading correction while advancing
-                    if heading_err_deg is not None and abs(heading_err_deg) > ANGLE_TOL_DEG * 1.5:
+                    if heading_err_deg is not None and abs(heading_err_deg) > REALIGN_ANGLE_DEG:
                         phase = "TURN_TO_FACE"
-                        status = "Heading drifted. Re-aligning turn."
+                        status = "Heading drifted. Re-aligning."
                     elif dist_m <= FINAL_DIST_TOL_M:
                         done_stable += 1
                         status = f"At destination ({done_stable}/{DONE_STABLE_FRAMES})"
@@ -334,13 +339,14 @@ def main():
                             status = "UGV marker is next to destination marker"
                     else:
                         done_stable = 0
-                        step_m = min(FORWARD_STEP_M, max(0.0, dist_m - FINAL_DIST_TOL_M))
-                        status = f"Driving forward. Remaining distance = {dist_m:.3f} m"
+                        move_cmd = choose_forward_cmd(dist_m)
+                        move_name = "MOVE_FORWARD" if move_cmd == v2v_bridge.CMD_MOVE_FORWARD else "MOVE_2FT"
+                        status = f"Driving forward with {move_name}. Remaining distance = {dist_m:.3f} m"
 
-                        if (time.time() - last_forward_cmd_time) >= FORWARD_CMD_RESEND_SEC:
-                            # Requires the patched ground station that treats GOTO:x,0 as body-forward motion
-                            bridge.send_challenge2_coords(step_m, 0.0)
-                            last_forward_cmd_time = time.time()
+                        if (time.time() - last_move_cmd_time) >= MOVE_CMD_RESEND_SEC:
+                            bridge.send_command(cmdSeq=cmd_seq, cmd=move_cmd, estop=0)
+                            cmd_seq += 1
+                            last_move_cmd_time = time.time()
 
             elif phase == "DONE":
                 status = "Finished. Press q to quit."
@@ -365,7 +371,7 @@ def main():
             pass
 
         cam.close()
-        print("UAV face-and-drive script closed.")
+        print("UAV commands-only script closed.")
 
 
 if __name__ == "__main__":
