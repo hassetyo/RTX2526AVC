@@ -9,6 +9,7 @@ import cv2
 import cv2.aruco as aruco
 import numpy as np
 
+TOLERANCE = 500.0 # distance (in mm) for two markers to be aligned on an axis
 
 @dataclass
 class MarkerPose:
@@ -546,7 +547,7 @@ def main():
                 draw_distance_overlay(display, pose_a, pose_b)
                 
                 #print the alignment instructions for marker A to align with marker B
-                instruction, amount_mm = calculate_alignment_instructions(pose_a, pose_b)
+                instruction, amount_mm = calculate_alignment_instructions(pose_a, pose_b, TOLERANCE)
                 cv2.putText(
                     display,
                     f"Alignment: {instruction} ({amount_mm:.1f} mm)",
@@ -558,9 +559,9 @@ def main():
                     cv2.LINE_AA,
                 )
                 if(instruction != "Aligned"):
-                    print(f"Marker {pose_a.marker_id} to Marker {pose_b.marker_id}: {instruction} by {amount_mm:.1f} mm")
+                    print(f"Move Marker {pose_a.marker_id} {instruction} by {amount_mm:.1f} mm to align with Marker {pose_b.marker_id}.", end="\r")
                 else:
-                    print(f"Markers {pose_a.marker_id} and {pose_b.marker_id} are aligned within 50 mm.")
+                    print(f"Markers {pose_a.marker_id} and {pose_b.marker_id} are aligned within 500 mm.")
             else:
                 cv2.putText(
                     display,
