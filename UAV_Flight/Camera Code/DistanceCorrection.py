@@ -476,7 +476,7 @@ def parse_args():
     parser.add_argument(
         "--fps",
         type=int,
-        default=30,
+        default=60,
         help="Camera FPS.",
     )
     return parser.parse_args()
