@@ -781,7 +781,7 @@ def main():
                 else:
                     if commander.last_motion in ("turn_left", "turn_right"):
                         commander.send_stop()
-                        time.sleep(0.15)
+                        time.sleep(2.0)
 
                     remaining = max(0.0, dist_m - args.stop_distance_m)
                     step_m = max(args.step_min_m, min(remaining * 0.5, args.step_max_m))
