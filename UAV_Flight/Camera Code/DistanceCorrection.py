@@ -551,6 +551,18 @@ def main():
             draw_crosshair(display)
             estimator.draw_markers(display, poses)
 
+            #print the fps on the top right corner, shifted to the left by 20 pixels to avoid overlapping with the close button on windows
+            cv2.putText(
+                display,
+                f"FPS: {cam.fps}",
+                (display.shape[1] - 140, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
             pair = pick_two_markers(poses, args.marker1_id, args.marker2_id)
             if pair is not None:
                 pose_a, pose_b = pair
@@ -571,7 +583,7 @@ def main():
                 )
                 if(instruction_y != "Aligned" or instruction_x != "Aligned"):
                     first_aligned_print = True
-                    print(f"Move Marker {pose_a.marker_id} {instruction_y}, {instruction_x} by {amount_mm_y:.1f}, {amount_mm_x:.1f} mm to align with Marker {pose_b.marker_id}.", end="\r")
+                    print(f"Move Marker {pose_a.marker_id} {instruction_x}, {instruction_y} by {amount_mm_x:.1f}, {amount_mm_y:.1f} mm to align with Marker {pose_b.marker_id}.", end="\r")
                 else:
                     if(first_aligned_print):
                         print(f"Markers {pose_a.marker_id} and {pose_b.marker_id} are aligned within {TOLERANCE} mm.")
