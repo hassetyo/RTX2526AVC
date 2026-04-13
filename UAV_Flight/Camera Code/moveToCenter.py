@@ -1,4 +1,5 @@
 '''Will tell the drone to move to the center of the 15x15 yard grid and rise until both aruco markers are visible for a set amount of time.'''
+#python3 ArUcoMovement.py --use-zed --ugv-marker-id 5 --dest-marker-id 0 --calibration ../calibration_chessboard.yaml --bridge-port /dev/ttyUSB0 --stop-distance-m 0.05 --drive-speed-mps 0.5 
 
 import argparse
 import math
