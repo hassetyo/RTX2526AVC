@@ -380,6 +380,7 @@ class UAVCommander:
 
         hb = master.wait_heartbeat(timeout=10)
         if not hb:
+            self.log_event("No heartbeat received from drone. Check connection and try again.")
             return None
         self.log_event("Drone Heartbeat OK.")
 
