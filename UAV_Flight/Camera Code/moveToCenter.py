@@ -881,7 +881,7 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
             UAVcommander.change_yaw(master, turnRight=False)
         else:
             UAVcommander.change_yaw(master, turnRight=True)
-        time.sleep(2)
+        current_time = time.time()
 
         #move forward sqrt(15) yards to get to the center
         distance = math.sqrt(15) * 0.9144 #convert yards to meters
@@ -946,8 +946,7 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
                     print("Reached maximum altitude but still cannot see both markers.")
                     return False
                 if testing:
-                    print("TESTING MODE: Markers not detected, simulating altitude increase...")
-                    time.sleep(2.0)
+                    print("markers not detected, increasing altitude... (TESTING MODE - skipping actual climb)")
                 else:
                     UAVcommander.log_event("markers not detected, increasing altitude...")
                     UAVcommander.climb_to_target(master, target_alt= + 0.2)
