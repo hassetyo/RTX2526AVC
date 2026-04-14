@@ -758,9 +758,7 @@ def initialize_system(args):
 '''Main ArUco navigation function'''
 def guideUGV(args, commander, estimator, cam):
 
-    print(
-        f"Tracking UGV marker {args.ugv_marker_id} toward destination marker {args.dest_marker_id}."
-    )
+    print(f"Tracking UGV marker {args.ugv_marker_id} toward destination marker {args.dest_marker_id}.")
 
     try:
         while True:
@@ -964,7 +962,7 @@ def main():
     cam, estimator, UGVcommander = initialize_system(args)
 
     if master is not None:
-        didItMove = moveToCenter(master, UAVcommander, estimator, args, cam)
+        didItMove = moveToCenter(master, UAVcommander, estimator, cam, args)
         if not didItMove:
             print("Failed to move to center and detect markers. Exiting.")
             return
