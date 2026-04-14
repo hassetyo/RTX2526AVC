@@ -951,6 +951,10 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
 
             cv2.imshow("ArUco Distance + UGV Navigation", display)
 
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                return False
+
     finally:
         cam.close()
         
