@@ -972,43 +972,52 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
         print("Finished moveToCenter sequence. Now starting Navigation...")
         FAIL_COUNT = 0
 
-def main():
-    UAVcommander = UAVboss.UAVCommander()
-    args = parse_args()
-    master = UAVcommander.connect()
-    UAVcommander.takeoff(master, target_alt=ALTITUDE)
-    cam, estimator, UGVcommander = initialize_system(args)
-
-    if master is not None:
-        didItMove = moveToCenter(master, UAVcommander, estimator, cam, args)
-        if (didItMove == 1):
-            print("Successfully moved to center and detected markers. Starting navigation...")
-        elif (didItMove == 0):
-            print("Logic Error")
-        elif (didItMove == -1):
-            print("User requested exit during move to center. Exiting.")
-            UAVcommander.land_safely(master)
-            cam.close()
-            UGVCommander.close()
-            return
-    else:
-        if (testing == True):
-            print("Running in testing mode without drone connection. Skipping move to center.")
-        else:
-            print("Failed to connect to drone. Exiting.")
-            return
-    
-    guideUGV(args, UGVcommander, estimator, cam)
-
-    print("Mission complete. Landing drone...")
+def endCode(master, UAVcommander, UGVcommander, cam):
+    print("Ending program and landing drone safely...")
+    time.sleep(2.0)
     UAVcommander.land_safely(master)
     cam.close()
-    UGVCommander.close()
+    UGVcommander.close()
+
+def main():
+    try:
+        UAVcommander = UAVboss.UAVCommander()
+        args = parse_args()
+        master = UAVcommander.connect()
+        UAVcommander.takeoff(master, target_alt=ALTITUDE)
+        cam, estimator, UGVcommander = initialize_system(args)
+
+        if master is not None:
+            didItMove = moveToCenter(master, UAVcommander, estimator, cam, args)
+            if (didItMove == 1):
+                print("Successfully moved to center and detected markers. Starting navigation...")
+            elif (didItMove == 0):
+                print("Logic Error")
+            elif (didItMove == -1):
+                print("User requested exit during move to center. Exiting.")
+                endCode(master, UAVcommander, UGVcommander, cam)
+                return
+        else:
+            if (testing == True):
+                print("Running in testing mode without drone connection. Skipping move to center.")
+            else:
+                print("Failed to connect to drone. Exiting.")
+                return
+        
+        guideUGV(args, UGVcommander, estimator, cam)
+
+        print("Mission complete. Landing drone...")
+        UAVcommander.land_safely(master)
+        cam.close()
+        UGVCommander.close()
+
+    except KeyboardInterrupt:
+        print("Keyboard interrupt received. Exiting moveToCenter sequence.")
+        endCode(master, UAVcommander, UGVcommander, cam)
+        return
 
     if testing:
         print("Mission completed without errors. Nice work")
-    
-
 
 if __name__ == "__main__":
     main()
