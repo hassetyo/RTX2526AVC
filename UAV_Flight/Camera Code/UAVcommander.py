@@ -92,6 +92,10 @@ class UAVCommander:
             1, 0, 0, 0, 0, 0, 0,
         )
         self.log_event("Arming motors...")
+        ack_msg = master.recv_match(type='COMMAND_ACK', blocking=True, timeout=3)
+        print(f"Change Mode ACK:  {ack_msg}")
+        print("Sent arm command")
+        
 
     def disarm_drone(self, master):  # emergency fallback if needed
         master.mav.command_long_send(
@@ -387,6 +391,8 @@ class UAVCommander:
         # step 1: start in stabilize like your mission 4 pattern
         self.change_mode(master, "STABILIZE")
         self.arm_drone(master)
-        
+
+
+
         # step 2: climb to the requested height
         self.climb_to_target(master, target_alt)

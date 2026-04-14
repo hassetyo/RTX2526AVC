@@ -898,7 +898,7 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
                 FAIL_COUNT += 1
                 if FAIL_COUNT > 5:
                     print("Failed to read frames too many times. Exiting.")
-                    return False
+                    return 0
                 continue
 
             poses = estimator.detect_markers(frame)
@@ -945,11 +945,11 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
                     forward_axis_name=args.ugv_forward_axis
                 )
                 
-                return True #markers are visible, switch to main navigation loop
+                return 1 #markers are visible, switch to main navigation loop
             else:
                 if (currentAlt >= 5.0):
                     print("Reached maximum altitude but still cannot see both markers.")
-                    return False
+                    return 0
                 if testing:
                     print("markers not detected, increasing altitude... (TESTING MODE - skipping actual climb)")
                 else:
@@ -961,7 +961,12 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
-                return False
+                return -1
+            
+    #if ctrl+c or any other exception occurs, exit the loop and proceed to landing
+    except KeyboardInterrupt:
+        print("Keyboard interrupt received. Exiting moveToCenter sequence.")
+        return -1
 
     finally:
         print("Finished moveToCenter sequence. Now starting Navigation...")
@@ -976,8 +981,15 @@ def main():
 
     if master is not None:
         didItMove = moveToCenter(master, UAVcommander, estimator, cam, args)
-        if not didItMove:
-            print("Failed to move to center and detect markers. Exiting.")
+        if (didItMove == 1):
+            print("Successfully moved to center and detected markers. Starting navigation...")
+        elif (didItMove == 0):
+            print("Logic Error")
+        elif (didItMove == -1):
+            print("User requested exit during move to center. Exiting.")
+            UAVcommander.land_safely(master)
+            cam.close()
+            UGVCommander.close()
             return
     else:
         if (testing == True):
@@ -991,6 +1003,7 @@ def main():
     print("Mission complete. Landing drone...")
     UAVcommander.land_safely(master)
     cam.close()
+    UGVCommander.close()
 
     if testing:
         print("Mission completed without errors. Nice work")
