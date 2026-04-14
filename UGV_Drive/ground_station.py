@@ -11,6 +11,7 @@ from pymavlink import mavutil
 # - legacy LOCAL_NED goto is still available when y != 0
 
 ############## config stuff
+UGV_BAUD_RATE = 115200
 UGV_CONTROL_PORT = "/dev/ttyACM0"   # Pixhawk/Cube connection
 ESP32_BRIDGE_PORT = "/dev/ttyUSB0"  # ESP32 bridge
 
@@ -140,16 +141,15 @@ def build_body_velocity_msg(vx_mps=0.0, vy_mps=0.0):
 
 def build_turn_msg(direction):
     # direction: +1 = right, -1 = left
-    # Use yaw_rate only. The final two fields are: yaw, yaw_rate
     return vehicle.message_factory.set_position_target_local_ned_encode(
         0, 0, 0,
         mavutil.mavlink.MAV_FRAME_BODY_NED,
-        0b0000011111111111,
+        0b0000101111111111,
         0, 0, 0,
         0, 0, 0,
         0, 0, 0,
-        0,
-        math.radians(TURN_YAW_RATE_DEG * direction)
+        math.radians(TURN_YAW_RATE_DEG * direction),
+        0
     )
 
 
@@ -218,7 +218,6 @@ def execute_circle(bridge, speed, yaw_rate_deg, circles=1):
         0, 0, 0,
         speed, 0, 0,
         0, 0, 0,
-        0,
         math.radians(yaw_rate_deg)
     )
 
@@ -269,10 +268,23 @@ def queue_body_move_from_goto(x_val, y_val):
 
     return None, 0.0, False
 
+def arm_ugv(vehicle):
+    for state in (True, False, True):
+        vehicle.armed = state
+        if not wait_for_armed(vehicle, state):
+            raise RuntimeError(f"Failed to set armed={state}")
+        time.sleep(1.0)
 
+    vehicle.mode = VehicleMode("GUIDED")
+    if not wait_for_mode(vehicle, "GUIDED"):
+        raise RuntimeError(f"Failed to enter GUIDED mode, current mode: {vehicle.mode.name}")
+    
 def main():
+    
     bridge = v2v_bridge.V2VBridge(ESP32_BRIDGE_PORT, name="UGV-Bridge")
     try:
+        vehicle = connect(UGV_CONTROL_PORT, wait_ready=True, baud=UGV_BAUD_RATE)
+        arm_ugv(vehicle)
         bridge.connect()
         bridge.send_message("ground station is live . awaiting drone orders")
     except:
