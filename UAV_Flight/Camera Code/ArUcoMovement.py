@@ -20,7 +20,7 @@ class MarkerPose:
     center_px: Tuple[int, int]
     corners: np.ndarray
 
-''' Displays the camera feed and information about the detected markers.'''
+
 class CameraInterface:
     """
     Camera wrapper that supports:
@@ -37,7 +37,7 @@ class CameraInterface:
         camera_index: int = 0,
         width: int = 1280,
         height: int = 720,
-        fps: int = 60,
+        fps: int = 30,
     ):
         self.use_zed = use_zed
         self.camera_index = camera_index
@@ -57,7 +57,6 @@ class CameraInterface:
         else:
             self._open_standard()
 
-    ''' Initialize the ZED camera and read its calibration parameters.'''
     def _open_zed(self):
         try:
             import pyzed.sl as sl
@@ -98,7 +97,6 @@ class CameraInterface:
         else:
             self.dist_coeffs = np.zeros((5, 1), dtype=np.float64)
 
-    ''' Initialize a standard camera using OpenCV and set its resolution and FPS.'''
     def _open_standard(self):
         self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
         if not self.cap.isOpened():
@@ -111,7 +109,6 @@ class CameraInterface:
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self.cap.set(cv2.CAP_PROP_FPS, self.fps)
 
-    ''' Load camera intrinsics from a YAML file or use default pinhole parameters if no file is provided.'''
     def load_standard_calibration(self, yaml_path: Optional[str]):
         if self.use_zed:
             return
@@ -150,13 +147,11 @@ class CameraInterface:
         )
         self.dist_coeffs = np.zeros((5, 1), dtype=np.float64)
 
-    ''' Get a single frame from the camera. For ZED, grab and retrieve the left image. For standard camera, read a frame using OpenCV.'''
     def get_frame(self) -> Optional[np.ndarray]:
         if self.use_zed:
             return self._get_zed_frame()
         return self._get_standard_frame()
 
-    ''' Get a frame from the ZED camera. Grab a new frame, retrieve the left image, and convert it to BGR format if needed.'''
     def _get_zed_frame(self) -> Optional[np.ndarray]:
         sl = self.sl
         if self.zed.grab() != sl.ERROR_CODE.SUCCESS:
@@ -173,14 +168,12 @@ class CameraInterface:
 
         return frame
 
-    ''' Get a frame from a standard camera using OpenCV. Read a frame and return it if successful.'''
     def _get_standard_frame(self) -> Optional[np.ndarray]:
         ret, frame = self.cap.read()
         if not ret:
             return None
         return frame
 
-    ''' Release camera resources. For ZED, close the camera. For standard camera, release the VideoCapture object. Also destroy any OpenCV windows.'''
     def close(self):
         if self.use_zed and self.zed is not None:
             self.zed.close()
@@ -188,7 +181,7 @@ class CameraInterface:
             self.cap.release()
         cv2.destroyAllWindows()
 
-''' Calculates the Aruco marker poses and distances'''
+
 class ArucoDistanceEstimator:
     def __init__(
         self,
@@ -212,7 +205,6 @@ class ArucoDistanceEstimator:
             self.detector = None
             self.use_new_detector_api = False
 
-    ''' Detect ArUco markers in the given frame and estimate their poses. Returns a dictionary mapping marker IDs to their poses.'''
     def detect_markers(self, frame: np.ndarray) -> Dict[int, MarkerPose]:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -244,7 +236,6 @@ class ArucoDistanceEstimator:
 
         return poses
 
-    ''' Estimate the pose of a single marker given its corner positions in the image. Uses solvePnP with a square marker model.'''
     def _estimate_pose(self, corner: np.ndarray):
         half = self.marker_size_m / 2.0
 
@@ -273,7 +264,6 @@ class ArucoDistanceEstimator:
 
         return rvec, tvec
 
-    '''' Draw detected markers and their axes on the frame. Also annotate the marker ID and center pixel coordinates.'''
     def draw_markers(self, frame: np.ndarray, poses: Dict[int, MarkerPose]):
         if not poses:
             return frame
@@ -308,9 +298,7 @@ class ArucoDistanceEstimator:
 
         return frame
 
-''' Pick two markers from the detected poses. If specific marker IDs are provided, try to find those. 
-    Otherwise, pick the two markers with the lowest IDs. 
-    Returns a tuple of the two MarkerPose objects or None if not enough markers are detected.'''
+
 def pick_two_markers(
     poses: Dict[int, MarkerPose],
     marker1_id: Optional[int],
@@ -327,15 +315,14 @@ def pick_two_markers(
     ordered_ids = sorted(poses.keys())
     return poses[ordered_ids[0]], poses[ordered_ids[1]]
 
-''' Draw a simple crosshair at the center of the frame.'''
+
 def draw_crosshair(frame: np.ndarray):
     h, w = frame.shape[:2]
     cx, cy = w // 2, h // 2
     cv2.line(frame, (0, cy), (w, cy), (0, 255, 0), 1)
     cv2.line(frame, (cx, 0), (cx, h), (0, 255, 0), 1)
 
-''' Draw a line between two markers and annotate the distance and relative position. 
-    Also displays a status box with detailed information about the markers and their relative pose.'''
+
 def draw_distance_overlay(
     frame: np.ndarray,
     pose_a: MarkerPose,
@@ -412,7 +399,6 @@ def draw_distance_overlay(
         y += line_h
 
 
-'''Controls the UGV navigation'''
 class UGVCommander:
     def __init__(
         self,
@@ -440,12 +426,10 @@ class UGVCommander:
         self.last_seen_time = 0.0
         self.last_status_text = "init"
 
-    ''' Connect to the ESP32 bridge and send an initial message indicating that the UGV navigator is online.'''
     def connect(self):
         self.bridge.connect()
         self.bridge.send_message("aruco ugv navigator online")
 
-    ''' Close the connection to the ESP32 bridge and send a stop command to ensure the UGV is not left moving.'''
     def close(self):
         try:
             self.send_stop(force=True)
@@ -453,13 +437,11 @@ class UGVCommander:
             pass
         self.bridge.stop()
 
-    ''' Generate the next sequence number for commands sent to the bridge. Increments an internal counter and returns the current value.'''
     def _next_seq(self) -> int:
         val = self.seq
         self.seq += 1
         return val
 
-    ''' Makes sure the UGV is armed before sending movement commands.'''
     def ensure_armed(self):
         if self.arm_sent:
             return
@@ -469,7 +451,6 @@ class UGVCommander:
         self.last_status_text = "arming sent"
         time.sleep(0.25)
 
-    '''Tells the UGV to turn left if it is not already turning left.'''
     def send_turn_left(self):
         if self.last_motion == "turn_left":
             return
@@ -478,7 +459,6 @@ class UGVCommander:
         self.last_motion = "turn_left"
         self.last_status_text = "turning left"
 
-    '''Tells the UGV to turn right if it is not already turning right.'''
     def send_turn_right(self):
         if self.last_motion == "turn_right":
             return
@@ -487,7 +467,6 @@ class UGVCommander:
         self.last_motion = "turn_right"
         self.last_status_text = "turning right"
 
-    '''Tells the UGV to stop if its not already stopped or if the stop if forced.'''
     def send_stop(self, force: bool = False):
         if not force and self.last_motion == "stopped":
             return
@@ -496,7 +475,6 @@ class UGVCommander:
         self.last_motion = "stopped"
         self.last_status_text = "stopped"
 
-    '''Tells the UGV to move forward a certain step in meters.'''
     def send_forward_step(self, step_m: float):
         now = time.time()
         if now < self.next_drive_time:
@@ -507,12 +485,11 @@ class UGVCommander:
         margin = 0.25
 
         print(f"[UGV] FORWARD STEP {step_m:.3f} m")
-        self.bridge.send_message(f"GOTO:{step_m:.3f},0")
+        self.bridge.send_command(self._next_seq(), v2v_bridge.CMD_MOVE_2FT, 0)
         self.last_motion = "forward"
         self.last_status_text = f"forward {step_m:.2f} m"
         self.next_drive_time = now + duration + margin
 
-    ''' If the markers are lost for longer than the specified timeout, send a stop command to the UGV and update the status text.'''
     def handle_marker_loss(self):
         now = time.time()
         if self.last_seen_time <= 0.0:
@@ -529,8 +506,7 @@ FORWARD_AXIS_MAP = {
     "-y": np.array([0.0, -1.0, 0.0], dtype=np.float64),
 }
 
-''' Calculate the forward direction of a marker in pixel coordinates. 
-Returns a 2D vector pointing in the forward direction of the marker or None if the direction cannot be determined.'''
+
 def get_marker_forward_direction_px(
     pose: MarkerPose,
     camera_matrix: np.ndarray,
@@ -566,7 +542,7 @@ def get_marker_forward_direction_px(
         return None
     return direction
 
-''' Calculate the signed angle in degrees between two 2D vectors. The angle is positive if vec_b is counterclockwise from vec_a, and negative if clockwise.'''
+
 def signed_angle_deg(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
     a = np.asarray(vec_a, dtype=np.float64).reshape(2)
     b = np.asarray(vec_b, dtype=np.float64).reshape(2)
@@ -583,7 +559,7 @@ def signed_angle_deg(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
     cross = float(a[0] * b[1] - a[1] * b[0])
     return math.degrees(math.atan2(cross, dot))
 
-''' Draw a navigation overlay on the frame showing the UGV and destination markers, the heading error, distance, and status text.'''
+
 def draw_nav_overlay(
     frame: np.ndarray,
     ugv_pose: MarkerPose,
@@ -672,7 +648,7 @@ def draw_nav_overlay(
         )
         y += line_h
 
-''' Parse command-line arguments for configuring the camera, ArUco detection, and UGV control parameters.'''
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
@@ -688,7 +664,7 @@ def parse_args():
     parser.add_argument("--dict", type=str, default="DICT_6X6_1000", help="ArUco dictionary name.")
     parser.add_argument("--width", type=int, default=1280, help="Standard camera width.")
     parser.add_argument("--height", type=int, default=720, help="Standard camera height.")
-    parser.add_argument("--fps", type=int, default=60, help="Camera FPS.")
+    parser.add_argument("--fps", type=int, default=30, help="Camera FPS.")
 
     parser.add_argument("--bridge-port", type=str, default="/dev/ttyUSB0", help="Local ESP32 bridge serial port used to send commands.")
     parser.add_argument("--bridge-baud", type=int, default=115200, help="ESP32 bridge baud rate.")
@@ -707,14 +683,14 @@ def parse_args():
     )
     return parser.parse_args()
 
-''' Get the ArUco dictionary constant from OpenCV by name. Raises a ValueError if the name is not valid.'''
+
 def get_dictionary_by_name(name: str) -> int:
     if not hasattr(aruco, name):
         valid = [x for x in dir(aruco) if x.startswith("DICT_")]
         raise ValueError(f"Unknown dictionary '{name}'. Valid examples: {valid[:10]}")
     return getattr(aruco, name)
 
-'''Main Function'''
+
 def main():
     args = parse_args()
     dictionary = get_dictionary_by_name(args.dict)
@@ -805,7 +781,7 @@ def main():
                 else:
                     if commander.last_motion in ("turn_left", "turn_right"):
                         commander.send_stop()
-                        time.sleep(2.0)
+                        time.sleep(0.15)
 
                     remaining = max(0.0, dist_m - args.stop_distance_m)
                     step_m = max(args.step_min_m, min(remaining * 0.5, args.step_max_m))

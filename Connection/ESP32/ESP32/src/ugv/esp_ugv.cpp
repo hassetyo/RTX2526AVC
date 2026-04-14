@@ -15,7 +15,8 @@
 // giving the ugv the mac adress of UAV as raw bytes
 // so the ESP-NOW targets devices by MAC address
 // we need to manually add the peer (UAV) to the ESP-NOW network
-static uint8_t UAV_MAC[6] = {0xf8, 0xb3, 0xb7, 0x20, 0x25, 0xa8}; 
+static uint8_t UAV_MAC[6] = {0xf8, 0xb3, 0xb7, 0x20, 0x69, 0xC0};
+//F8:B3:B7:20:69:C0  
 
 //////////////////// protocol stuff
 /* i had to add protocol cause , when i was sending raw bytes over usb, sometimes a byte got lost or corrupted

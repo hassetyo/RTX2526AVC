@@ -7,7 +7,8 @@
 #include "freertos/queue.h" // the mailboxes for safer data handoffs
 
 // mac address of the ugv (ground station) so we know where to scream
-static uint8_t UGV_MAC[6] = {0xF8, 0xB3, 0xB7, 0x20, 0x69, 0xC0}; 
+static uint8_t UGV_MAC[6] = {0xC4, 0xDD, 0x57, 0x9E, 0x95, 0xA4}; 
+//C4:DD:57:9E:95:A4
 
 // binary markers so we can find the start of a real message in the usb noise
 static const uint8_t SOF = 0xAA; // 170 (10101010) start of packet
