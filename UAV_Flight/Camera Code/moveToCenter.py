@@ -15,6 +15,7 @@ import v2v_bridge
 import UAVcommander
 
 testing = True
+ALTITUDE = 0.3 if testing else 2.3
 
 @dataclass
 class MarkerPose:
@@ -871,7 +872,7 @@ def moveToCenter(master, UAVcommander, estimator, cam, bottomRight = True):
     
     try:
         #arm and takeoff
-        UAVcommander.takeoff(master, target_altitude=2.3)
+        UAVcommander.takeoff(master, target_alt=ALTITUDE)
         if bottomRight:
             turnLeft = True
         else:

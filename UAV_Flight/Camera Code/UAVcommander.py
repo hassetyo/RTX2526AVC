@@ -110,7 +110,10 @@ class UAVCommander:
             0, 0, pwm, 0, 0, 0, 0, 0,
         )
 
-    def set_rc_override(self, master, x = THROTTLE_HOVER,y = THROTTLE_HOVER,z = THROTTLE_HOVER):
+    def set_rc_override(self, master, pitch = THROTTLE_HOVER, yaw = THROTTLE_HOVER, roll = THROTTLE_HOVER, throttle = THROTTLE_HOVER):  # helper to set multiple channels at once, default to hover for non-throttle channels
+        x = throttle if pitch is None else pitch
+        y = throttle if yaw is None else yaw
+        z = throttle if roll is None else roll
         master.mav.rc_channels_override_send(
             master.target_system,
             master.target_component,
