@@ -359,7 +359,7 @@ def main():
                     drive_msg = None
                     active_drive_msg = None
                     active_drive_until = 0.0
-                    execute_turn(bridge, 1)
+                    active_turn_msg = build_turn_msg(+1)
                     print("[Ground] >>> CONTINUOUS TURN RIGHT STARTED")
 
                 elif cmdVal == v2v_bridge.CMD_TURN_LEFT:
@@ -367,7 +367,7 @@ def main():
                     drive_msg = None
                     active_drive_msg = None
                     active_drive_until = 0.0
-                    execute_turn(bridge, -1)
+                    active_turn_msg = build_turn_msg(-1)
                     print("[Ground] >>> CONTINUOUS TURN LEFT STARTED")
 
                 elif cmdVal == v2v_bridge.CMD_CIRCLE:
