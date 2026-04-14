@@ -1,5 +1,5 @@
 import time
-import v2v_bridge
+import v2v_bridge2
 
 # UAV-SIDE SCRIPT FOR CHALLENGE 1
 # Sends only the destination to the UGV.
