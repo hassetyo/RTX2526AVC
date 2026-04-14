@@ -938,6 +938,7 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
                     cam.dist_coeffs,
                     args.marker_size,
                     args.ugv_forward_axis,
+                    forward_axis_name #added
                 )
                 
                 return True #markers are visible, switch to main navigation loop
