@@ -56,6 +56,36 @@ def log_avoidance(text):
 
 
 ######################### status logic
+def wait_for_armed(desired_state, timeout_s=5.0):
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if vehicle.armed == desired_state:
+            return True
+        time.sleep(0.1)
+    return vehicle.armed == desired_state
+
+
+def wait_for_mode(mode_name, timeout_s=5.0):
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if vehicle.mode.name == mode_name:
+            return True
+        time.sleep(0.1)
+    return vehicle.mode.name == mode_name
+
+
+def ensure_guided():
+    if vehicle.mode.name != "GUIDED":
+        print(f"[Ground] Switching {vehicle.mode.name} -> GUIDED...")
+        vehicle.mode = VehicleMode("GUIDED")
+        if not wait_for_mode("GUIDED", timeout_s=5.0):
+            raise RuntimeError(f"Failed to enter GUIDED mode. Current mode: {vehicle.mode.name}")
+
+
+def ensure_ready(bridge):
+    if not vehicle.armed:
+        arm_and_sync(bridge)
+    ensure_guided()
 
 def broadcast_status(bridge, seq):
     armed_val = 1 if vehicle.armed else 0
@@ -84,12 +114,15 @@ def arm_and_sync(bridge):
     if not vehicle.is_armable:
         print(f"!!! [WARNING] PRE-ARM CHECKS FAILED (GPS: {vehicle.gps_0.fix_type}) !!!")
 
-    for attempt in ["FIRST ARM", "RESET DISARM", "FINAL ARM"]:
-        state = True if "ARM" in attempt else False
-        print(f"  [FORCE-SYNC] Initiating {attempt} in {vehicle.mode.name} mode...")
-        for retry in range(3):
+    for label, state in [
+        ("FIRST ARM", True),
+        ("RESET DISARM", False),
+        ("FINAL ARM", True),
+    ]:
+        print(f"  [FORCE-SYNC] Initiating {label} in {vehicle.mode.name} mode...")
+        for _ in range(3):
             vehicle.armed = state
-            timeout = time.time() + 3
+            timeout = time.time() + 3.0
             while vehicle.armed != state:
                 if time.time() > timeout:
                     break
@@ -100,17 +133,14 @@ def arm_and_sync(bridge):
         time.sleep(1.0)
 
     if not vehicle.armed:
-        return
+        raise RuntimeError("Failed to arm UGV")
 
     print(f"  [MODE] Switching {vehicle.mode.name} -> GUIDED...")
     vehicle.mode = VehicleMode("GUIDED")
-    m_timeout = time.time() + 5
-    while vehicle.mode.name != "GUIDED" and time.time() < m_timeout:
-        broadcast_status(bridge, 0)
-        time.sleep(0.1)
+    if not wait_for_mode("GUIDED", timeout_s=5.0):
+        raise RuntimeError(f"Failed to enter GUIDED mode. Current mode: {vehicle.mode.name}")
 
     print("!!! UGV FULLY ARMED AND SYNCED !!!\n")
-
 
 ####### MAVLink message builders
 
@@ -148,7 +178,7 @@ def build_turn_msg(direction):
         0, 0, 0,
         0, 0, 0,
         0, 0, 0,
-        0,
+        0.0,
         math.radians(TURN_YAW_RATE_DEG * direction)
     )
 
@@ -168,6 +198,8 @@ def build_local_ned_goto_msg(x, y):
 ####### execution helpers
 
 def execute_drive(bridge, distance_m):
+    ensure_ready(bridge)
+
     print(f"[Ground] DRIVE: {distance_m}m at {SPEED_MPS}m/s")
     direction = 1.0 if distance_m >= 0 else -1.0
     msg = build_body_velocity_msg(vx_mps=direction * SPEED_MPS, vy_mps=0.0)
@@ -184,21 +216,22 @@ def execute_drive(bridge, distance_m):
 
 
 def execute_turn(bridge, angle_deg):
-    # kept for backward compatibility with old paths
-    print(f"[Ground] >>> EXECUTING LEGACY TIMED TURN {angle_deg} DEGREES")
-    yaw_rate = TURN_YAW_RATE_DEG
+    ensure_ready(bridge)
+
+    print(f"[Ground] >>> EXECUTING TURN STEP {angle_deg:.1f} DEGREES")
     direction = 1 if angle_deg > 0 else -1
     msg = build_turn_msg(direction)
 
-    duration = abs(angle_deg) / yaw_rate
+    duration = max(abs(angle_deg) / TURN_YAW_RATE_DEG, 0.15)
     start_t = time.time()
+
     while (time.time() - start_t) < duration:
         vehicle.send_mavlink(msg)
         broadcast_status(bridge, 0)
         time.sleep(0.1)
 
     vehicle.send_mavlink(build_stop_msg())
-    time.sleep(1.0)
+    time.sleep(0.25)
 
 
 def execute_drive_forever(bridge, speed_mps):
@@ -358,18 +391,18 @@ def main():
                 elif cmdVal == v2v_bridge.CMD_TURN_RIGHT:
                     mission_active = False
                     drive_msg = None
+                    active_turn_msg = None
                     active_drive_msg = None
                     active_drive_until = 0.0
-                    active_turn_msg = build_turn_msg(+1)
-                    print("[Ground] >>> CONTINUOUS TURN RIGHT STARTED")
+                    execute_turn(bridge, 12.0)
 
                 elif cmdVal == v2v_bridge.CMD_TURN_LEFT:
                     mission_active = False
                     drive_msg = None
+                    active_turn_msg = None
                     active_drive_msg = None
                     active_drive_until = 0.0
-                    active_turn_msg = build_turn_msg(-1)
-                    print("[Ground] >>> CONTINUOUS TURN LEFT STARTED")
+                    execute_turn(bridge, -12.0)
 
                 elif cmdVal == v2v_bridge.CMD_CIRCLE:
                     active_turn_msg = None
