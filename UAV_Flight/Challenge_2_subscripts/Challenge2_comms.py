@@ -25,7 +25,7 @@ def main():
     print("==========================================")
     print(f"Connecting to UAV bridge on {UAV_BRIDGE_PORT}...")
 
-    bridge = v2v_bridge.V2VBridge(UAV_BRIDGE_PORT, baud=BAUD_RATE, name="UAV-Bridge")
+    bridge = v2v_bridge2.V2VBridge(UAV_BRIDGE_PORT, baud=BAUD_RATE, name="UAV-Bridge")
 
     try:
         bridge.connect()
