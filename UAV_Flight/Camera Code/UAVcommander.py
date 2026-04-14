@@ -371,7 +371,9 @@ class UAVCommander:
         else:
             master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE)
 
-        master.wait_heartbeat()
+        hb = master.wait_heartbeat(timeout=10)
+        if not hb:
+            return None
         self.log_event("Drone Heartbeat OK.")
 
         self.request_message_streams(master)

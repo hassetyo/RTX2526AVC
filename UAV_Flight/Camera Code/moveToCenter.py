@@ -14,6 +14,7 @@ import numpy as np
 import v2v_bridge
 import UAVcommander
 
+testing = True
 
 @dataclass
 class MarkerPose:
@@ -925,10 +926,17 @@ def main():
     master = UAVcommander.connect()
     cam, estimator, UGVcommander = initialize_system(args)
 
-    didItMove = moveToCenter(master, UAVcommander, estimator, cam)
-    if not didItMove:
-        print("Failed to move to center and detect markers. Exiting.")
-        return
+    if master is not None:
+        didItMove = moveToCenter(master, UAVcommander, estimator, cam)
+        if not didItMove:
+            print("Failed to move to center and detect markers. Exiting.")
+            return
+    else:
+        if (testing == True):
+            print("Running in testing mode without drone connection. Skipping move to center.")
+        else:
+            print("Failed to connect to drone. Exiting.")
+            return
     
     guideUGV(args, UGVcommander, estimator, cam)
 
