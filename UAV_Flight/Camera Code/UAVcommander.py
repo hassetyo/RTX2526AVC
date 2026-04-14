@@ -236,7 +236,7 @@ class UAVCommander:
                 self.set_throttle(master, THROTTLE_HOVER)
 
                 # require the altitude to stay near target briefly before switching to alt hold
-                if abs(alt - target_alt) <= 0.20:
+                if abs(alt - target_alt) <= 0.50:
                     if stable_start is None:
                         stable_start = time.time()
                     elif (time.time() - stable_start) >= 1.2:
