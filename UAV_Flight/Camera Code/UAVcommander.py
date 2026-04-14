@@ -333,6 +333,37 @@ class UAVCommander:
         self.set_rc_override(master, pitch=1500, throttle=THROTTLE_HOVER)
         self.log_event("Hovering at destination.")
 
+    # ***
+    # ***
+    # ***
+    # ***
+    def send_body_velocity(self, master, vx: float, vy: float, vz: float):
+        '''Send a body-frame velocity setpoint via SET_POSITION_TARGET_LOCAL_NED.
+        vx = forward (m/s), vy = right (m/s), vz = down (m/s, positive = descend).
+        Drone must already be in GUIDED mode for this to have effect.
+        type_mask ignores position and acceleration, uses velocity only.'''
+        FRAME_BODY_NED = 8
+        TYPE_MASK_VEL_ONLY = (
+            mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE
+            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE
+            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Z_IGNORE
+            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE
+            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
+            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
+            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
+            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
+        )
+        master.mav.set_position_target_local_ned_send(
+            int(time.time() * 1000) & 0xFFFFFFFF,
+            master.target_system,
+            master.target_component,
+            FRAME_BODY_NED,
+            TYPE_MASK_VEL_ONLY,
+            0.0, 0.0, 0.0,   # position (ignored)
+            vx, vy, vz,       # velocity
+            0.0, 0.0, 0.0,   # acceleration (ignored)
+            0.0, 0.0,         # yaw, yaw_rate (ignored)
+        )
 
     def land_safely(self, master):
         # switches to land mode and then BLOCKS until the cube's heartbeat confirms
@@ -392,8 +423,6 @@ class UAVCommander:
         # step 1: start in stabilize like your mission 4 pattern
         self.change_mode(master, "STABILIZE")
         self.arm_drone(master)
-
-
 
         # step 2: climb to the requested height
         self.climb_to_target(master, target_alt)
