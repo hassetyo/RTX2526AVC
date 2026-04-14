@@ -12,7 +12,7 @@ import cv2.aruco as aruco
 import numpy as np
 
 import v2v_bridge
-import UAVcommander
+import UAVcommander as UAVboss
 
 testing = True
 ALTITUDE = 0.3 if testing else 2.3
@@ -922,7 +922,7 @@ def moveToCenter(master, UAVcommander, estimator, cam, bottomRight = True):
         
 
 def main():
-    UAVcommander = UAVcommander.UAVCommander()
+    UAVcommander = UAVboss.UAVCommander()
     args = parse_args()
     master = UAVcommander.connect()
     cam, estimator, UGVcommander = initialize_system(args)
