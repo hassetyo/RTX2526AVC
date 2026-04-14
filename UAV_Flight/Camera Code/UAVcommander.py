@@ -275,7 +275,7 @@ class UAVCommander:
     def get_yaw(self, master):
         msg = master.recv_match(type="GLOBAL_POSITION_INT", blocking=False)
         while msg:
-            yaw = math.degrees(msg.hdg / 100.0)  # convert from centidegrees to degrees
+            yaw = msg.hdg / 100.0  # convert from centidegrees to degrees
             return yaw
         return None
     

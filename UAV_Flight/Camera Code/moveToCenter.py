@@ -888,7 +888,7 @@ def moveToCenter(master, UAVcommander, estimator, cam, bottomRight = True):
         #move forward sqrt(15) yards to get to the center
         distance = math.sqrt(15) * 0.9144 #convert yards to meters
         time_to_center = distance / 1.5 #assuming a forward speed of 1.5 m/s
-        UAVcommander.move_pitch(master, forward=True, distance = time_to_center)
+        UAVcommander.move_pitch(master, forward=True, seconds = time_to_center)
 
         while True:
             frame = cam.get_frame()
