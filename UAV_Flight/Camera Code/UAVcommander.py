@@ -235,8 +235,8 @@ class UAVCommander:
             else:
                 self.set_throttle(master, THROTTLE_HOVER)
 
-                # require the altitude to stay near target briefly before switching to alt hold
-                if abs(alt - target_alt) <= 0.50:
+                # require the altitude be at or above the target for a short amount of time
+                if alt > (target_alt - 0.50):
                     if stable_start is None:
                         stable_start = time.time()
                     elif (time.time() - stable_start) >= 1.2:
@@ -387,6 +387,6 @@ class UAVCommander:
         # step 1: start in stabilize like your mission 4 pattern
         self.change_mode(master, "STABILIZE")
         self.arm_drone(master)
-
+        
         # step 2: climb to the requested height
         self.climb_to_target(master, target_alt)

@@ -2,7 +2,6 @@
 #python3 moveToCenter.py --use-zed --ugv-marker-id 5 --dest-marker-id 0 --calibration ../calibration_chessboard.yaml --bridge-port /dev/ttyUSB0 --stop-distance-m 0.05 --drive-speed-mps 0.5 
 
 import argparse
-from asyncio import subprocess
 import math
 import time
 from dataclasses import dataclass
@@ -14,7 +13,6 @@ import numpy as np
 
 import v2v_bridge
 import UAVcommander as UAVboss
-import ArUcoMovement as ArUcoNav
 testing = True
 ALTITUDE = 0.3 if testing else 2.3
 FAIL_COUNT = 0
@@ -760,7 +758,9 @@ def initialize_system(args):
 '''Main ArUco navigation function'''
 def guideUGV(args, commander, estimator, cam):
 
-    print(f"Tracking UGV marker {args.ugv_marker_id} toward destination marker {args.dest_marker_id}.")
+    print(
+        f"Tracking UGV marker {args.ugv_marker_id} toward destination marker {args.dest_marker_id}."
+    )
 
     try:
         while True:
@@ -768,10 +768,6 @@ def guideUGV(args, commander, estimator, cam):
             if frame is None:
                 print("Failed to read frame.")
                 commander.handle_marker_loss()
-                FAIL_COUNT += 1
-                if FAIL_COUNT > 5:
-                    print("Failed to read frames too many times. Exiting.")
-                    break
                 continue
 
             poses = estimator.detect_markers(frame)
@@ -816,25 +812,24 @@ def guideUGV(args, commander, estimator, cam):
                 else:
                     if commander.last_motion in ("turn_left", "turn_right"):
                         commander.send_stop()
-                        time.sleep(2.0)
+                        time.sleep(0.15)
 
                     remaining = max(0.0, dist_m - args.stop_distance_m)
                     step_m = max(args.step_min_m, min(remaining * 0.5, args.step_max_m))
                     commander.send_forward_step(step_m)
 
                 draw_nav_overlay(
-                    frame=display,
-                    ugv_pose=ugv_pose,
-                    dest_pose=dest_pose,
-                    heading_error_deg=heading_error_deg,
-                    status_text=commander.last_status_text,  # Uses the actual UGV status
-                    stop_distance_m=args.stop_distance_m,
-                    camera_matrix=cam.camera_matrix,
-                    dist_coeffs=cam.dist_coeffs,
-                    marker_size_m=args.marker_size,
-                    forward_axis_name=args.ugv_forward_axis
+                    display,
+                    ugv_pose,
+                    dest_pose,
+                    heading_error_deg,
+                    commander.last_status_text,
+                    args.stop_distance_m,
+                    cam.camera_matrix,
+                    cam.dist_coeffs,
+                    args.marker_size,
+                    args.ugv_forward_axis,
                 )
-
             else:
                 commander.handle_marker_loss()
                 cv2.putText(
@@ -876,8 +871,6 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
     print("Moving to center of grid and looking for markers...")
     
     try:
-        #arm and takeoff
-        UAVcommander.takeoff(master, target_alt=ALTITUDE)
         if bottomRight:
             turnLeft = True
         else:
@@ -974,23 +967,11 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
         print("Finished moveToCenter sequence. Now starting Navigation...")
         FAIL_COUNT = 0
 
-def launch_aruco_script():
-    cmd = [
-        "python3", 
-        "ArUcoMovement.py", 
-        "--use-zed", 
-        "--ugv-marker-id", "5", 
-        "--dest-marker-id", "0"
-    ]
-    
-    print("Launching ArUco Navigation...")
-    subprocess.run(cmd)
-
-
 def main():
     UAVcommander = UAVboss.UAVCommander()
     args = parse_args()
     master = UAVcommander.connect()
+    UAVcommander.takeoff(master, target_alt=ALTITUDE)
     cam, estimator, UGVcommander = initialize_system(args)
 
     if master is not None:
@@ -1005,10 +986,7 @@ def main():
             print("Failed to connect to drone. Exiting.")
             return
     
-    #guideUGV(args, UGVcommander, estimator, cam)
-    cam.close() #close camera before launching the next script which will open it again
-    UGVcommander.close() #close the UGV commander bridge connection before launching the next script which will open it again
-    launch_aruco_script()
+    guideUGV(args, UGVcommander, estimator, cam)
 
     print("Mission complete. Landing drone...")
     UAVcommander.land_safely(master)
