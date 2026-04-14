@@ -140,15 +140,16 @@ def build_body_velocity_msg(vx_mps=0.0, vy_mps=0.0):
 
 def build_turn_msg(direction):
     # direction: +1 = right, -1 = left
+    # Use yaw_rate only. The final two fields are: yaw, yaw_rate
     return vehicle.message_factory.set_position_target_local_ned_encode(
         0, 0, 0,
         mavutil.mavlink.MAV_FRAME_BODY_NED,
-        0b0000101111111111,
+        0b0000011111111111,
         0, 0, 0,
         0, 0, 0,
         0, 0, 0,
-        math.radians(TURN_YAW_RATE_DEG * direction),
-        0
+        0,
+        math.radians(TURN_YAW_RATE_DEG * direction)
     )
 
 
@@ -217,6 +218,7 @@ def execute_circle(bridge, speed, yaw_rate_deg, circles=1):
         0, 0, 0,
         speed, 0, 0,
         0, 0, 0,
+        0,
         math.radians(yaw_rate_deg)
     )
 
