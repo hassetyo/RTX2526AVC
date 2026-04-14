@@ -289,7 +289,7 @@ class UAVCommander:
         while (time.time() - start) < TURN_TIME:
             # CH4 is Yaw. 1500 is neutral, 1600 is right rotation
             self.set_rc_override(master, yaw=TURN_DIRECTION, throttle=THROTTLE_HOVER)
-            print(f"Current yaw: {self.get_yaw(master):.1f} degrees", end="\r", flush=True)
+            print(f"Current yaw: {self.get_yaw(master):.1f} degrees")
             time.sleep(0.1)
         self.set_rc_override(master, yaw=THROTTLE_HOVER, throttle=THROTTLE_HOVER)
 

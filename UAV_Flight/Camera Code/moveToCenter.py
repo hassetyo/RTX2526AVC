@@ -890,6 +890,9 @@ def moveToCenter(master, UAVcommander, estimator, cam, bottomRight = True):
         time_to_center = distance / 1.5 #assuming a forward speed of 1.5 m/s
         UAVcommander.move_pitch(master, forward=True, seconds = time_to_center)
 
+        if testing:
+            print("\n\n TESTING MODE: Opening Camera")
+
         while True:
             frame = cam.get_frame()
             if frame is None:
@@ -911,7 +914,7 @@ def moveToCenter(master, UAVcommander, estimator, cam, bottomRight = True):
                     print("Reached maximum altitude but still cannot see both markers.")
                     return False
                 UAVcommander.log_event("markers not detected, increasing altitude...")
-                UAVcommander.climb_to_target(master, target_altitude= + 0.2)
+                UAVcommander.climb_to_target(master, target_alt= + 0.2)
                 time.sleep(2.0)
 
 
