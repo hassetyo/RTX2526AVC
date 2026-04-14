@@ -945,9 +945,13 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
                 if (currentAlt >= 5.0):
                     print("Reached maximum altitude but still cannot see both markers.")
                     return False
-                UAVcommander.log_event("markers not detected, increasing altitude...")
-                UAVcommander.climb_to_target(master, target_alt= + 0.2)
-                time.sleep(2.0)
+                if testing:
+                    print("TESTING MODE: Markers not detected, simulating altitude increase...")
+                    time.sleep(2.0)
+                else:
+                    UAVcommander.log_event("markers not detected, increasing altitude...")
+                    UAVcommander.climb_to_target(master, target_alt= + 0.2)
+                    time.sleep(2.0)
 
             cv2.imshow("ArUco Distance + UGV Navigation", display)
 
