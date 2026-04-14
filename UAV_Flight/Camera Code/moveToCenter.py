@@ -16,6 +16,7 @@ import UAVcommander as UAVboss
 
 testing = True
 ALTITUDE = 0.3 if testing else 2.3
+FAIL_COUNT = 0
 
 @dataclass
 class MarkerPose:
@@ -766,6 +767,10 @@ def guideUGV(args, commander, estimator, cam):
             if frame is None:
                 print("Failed to read frame.")
                 commander.handle_marker_loss()
+                FAIL_COUNT += 1
+                if FAIL_COUNT > 5:
+                    print("Failed to read frames too many times. Exiting.")
+                    break
                 continue
 
             poses = estimator.detect_markers(frame)
@@ -896,6 +901,10 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
             frame = cam.get_frame()
             if frame is None:
                 print("Failed to read frame.")
+                FAIL_COUNT += 1
+                if FAIL_COUNT > 5:
+                    print("Failed to read frames too many times. Exiting.")
+                    return False
                 continue
 
             poses = estimator.detect_markers(frame)
@@ -961,7 +970,8 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
                 return False
 
     finally:
-        cam.close()
+        print("Finished moveToCenter sequence. Now starting Navigation...")
+        FAIL_COUNT = 0
         
 
 def main():
@@ -983,6 +993,14 @@ def main():
             return
     
     guideUGV(args, UGVcommander, estimator, cam)
+
+    print("Mission complete. Landing drone...")
+    UAVcommander.land_safely(master)
+    cam.close()
+
+    if testing:
+        print("Mission completed without errors. Nice work")
+    
 
 
 if __name__ == "__main__":
