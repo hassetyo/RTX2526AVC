@@ -2,6 +2,7 @@
 #python3 moveToCenter.py --use-zed --ugv-marker-id 5 --dest-marker-id 0 --calibration ../calibration_chessboard.yaml --bridge-port /dev/ttyUSB0 --stop-distance-m 0.05 --drive-speed-mps 0.5 
 
 import argparse
+from asyncio import subprocess
 import math
 import time
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ import numpy as np
 
 import v2v_bridge
 import UAVcommander as UAVboss
-
+import ArUcoMovement as ArUcoNav
 testing = True
 ALTITUDE = 0.3 if testing else 2.3
 FAIL_COUNT = 0
@@ -972,7 +973,19 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
     finally:
         print("Finished moveToCenter sequence. Now starting Navigation...")
         FAIL_COUNT = 0
-        
+
+def launch_aruco_script():
+    cmd = [
+        "python3", 
+        "ArUcoMovement.py", 
+        "--use-zed", 
+        "--ugv-marker-id", "5", 
+        "--dest-marker-id", "0"
+    ]
+    
+    print("Launching ArUco Navigation...")
+    subprocess.run(cmd)
+
 
 def main():
     UAVcommander = UAVboss.UAVCommander()
@@ -992,7 +1005,10 @@ def main():
             print("Failed to connect to drone. Exiting.")
             return
     
-    guideUGV(args, UGVcommander, estimator, cam)
+    #guideUGV(args, UGVcommander, estimator, cam)
+    cam.close() #close camera before launching the next script which will open it again
+    UGVcommander.close() #close the UGV commander bridge connection before launching the next script which will open it again
+    launch_aruco_script()
 
     print("Mission complete. Landing drone...")
     UAVcommander.land_safely(master)
