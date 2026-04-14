@@ -1,5 +1,5 @@
 '''Will tell the drone to move to the center of the 15x15 yard grid and rise until both aruco markers are visible for a set amount of time.'''
-#python3 ArUcoMovement.py --use-zed --ugv-marker-id 5 --dest-marker-id 0 --calibration ../calibration_chessboard.yaml --bridge-port /dev/ttyUSB0 --stop-distance-m 0.05 --drive-speed-mps 0.5 
+#python3 moveToCenter.py --use-zed --ugv-marker-id 5 --dest-marker-id 0 --calibration ../calibration_chessboard.yaml --bridge-port /dev/ttyUSB0 --stop-distance-m 0.05 --drive-speed-mps 0.5 
 
 import argparse
 import math
@@ -14,6 +14,7 @@ import numpy as np
 import v2v_bridge
 import UAVcommander
 
+testing = True
 
 @dataclass
 class MarkerPose:
@@ -717,9 +718,8 @@ def get_dictionary_by_name(name: str) -> int:
         raise ValueError(f"Unknown dictionary '{name}'. Valid examples: {valid[:10]}")
     return getattr(aruco, name)
 
-'''Main Function'''
-def main():
-    args = parse_args()
+'''Initialize the camera, ArUco estimator, and UGV commander before entering the main functionality'''
+def initialize_system(args):
     dictionary = get_dictionary_by_name(args.dict)
 
     cam = CameraInterface(
@@ -752,8 +752,11 @@ def main():
     )
     commander.connect()
 
-    print("Press q to quit.")
-    print("Press s to save a screenshot.")
+    return cam, estimator, commander
+
+'''Main ArUco navigation function'''
+def guideUGV(args, commander, estimator, cam):
+
     print(
         f"Tracking UGV marker {args.ugv_marker_id} toward destination marker {args.dest_marker_id}."
     )
@@ -861,6 +864,81 @@ def main():
     finally:
         commander.close()
         cam.close()
+
+''' Tells the drone to move to the center of the grid and increase altitude until both markers are visible, then switch to the main navigation loop. This can help in cases where the markers are initially too close or partially out of frame.'''
+def moveToCenter(master, UAVcommander, estimator, cam, bottomRight = True):
+    print("Moving to center of grid and looking for markers...")
+    
+    try:
+        #arm and takeoff
+        UAVcommander.takeoff(master, target_altitude=2.3)
+        if bottomRight:
+            turnLeft = True
+        else:
+            turnLeft = False
+        currentAlt = UAVcommander.print_altitude(master)
+        #make the drone turn 45 degrees to the left/right
+        if turnLeft:
+            UAVcommander.change_yaw(master, turnRight=False)
+        else:
+            UAVcommander.change_yaw(master, turnRight=True)
+        time.sleep(2)
+
+        #move forward sqrt(15) yards to get to the center
+        distance = math.sqrt(15) * 0.9144 #convert yards to meters
+        time_to_center = distance / 1.5 #assuming a forward speed of 1.5 m/s
+        UAVcommander.move_pitch(master, forward=True, distance = time_to_center)
+
+        while True:
+            frame = cam.get_frame()
+            if frame is None:
+                print("Failed to read frame.")
+                continue
+
+            poses = estimator.detect_markers(frame)
+            display = frame.copy()
+
+            draw_crosshair(display)
+            estimator.draw_markers(display, poses)
+
+            if len(poses) >= 2:
+                draw_distance_overlay(display, *list(poses.values())[:2])
+                UAVcommander.log_event(f"markers detected! ids = {list(poses.keys())}")
+                return True #markers are visible, switch to main navigation loop
+            else:
+                if (currentAlt >= 5.0):
+                    print("Reached maximum altitude but still cannot see both markers.")
+                    return False
+                UAVcommander.log_event("markers not detected, increasing altitude...")
+                UAVcommander.climb_to_target(master, target_altitude= + 0.2)
+                time.sleep(2.0)
+
+
+            cv2.imshow("ArUco Distance + UGV Navigation", display)
+
+    finally:
+        cam.close()
+        
+
+def main():
+    UAVcommander = UAVcommander.UAVCommander()
+    args = parse_args()
+    master = UAVcommander.connect()
+    cam, estimator, UGVcommander = initialize_system(args)
+
+    if master is not None:
+        didItMove = moveToCenter(master, UAVcommander, estimator, cam)
+        if not didItMove:
+            print("Failed to move to center and detect markers. Exiting.")
+            return
+    else:
+        if (testing == True):
+            print("Running in testing mode without drone connection. Skipping move to center.")
+        else:
+            print("Failed to connect to drone. Exiting.")
+            return
+    
+    guideUGV(args, UGVcommander, estimator, cam)
 
 
 if __name__ == "__main__":

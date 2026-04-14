@@ -1,5 +1,5 @@
 import time
-import v2v_bridge
+import v2v_bridge2
 
 # UAV-SIDE SCRIPT FOR CHALLENGE 1
 # Sends only the destination to the UGV.
@@ -16,7 +16,7 @@ Y_DISTANCE_FT = 8.0
 
 
 def main():
-    bridge = v2v_bridge.V2VBridge(UAV_BRIDGE_PORT, name="UAV-Bridge")
+    bridge = v2v_bridge2.V2VBridge(UAV_BRIDGE_PORT, name="UAV-Bridge")
 
     try:
         bridge.connect()

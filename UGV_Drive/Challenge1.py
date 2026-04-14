@@ -349,14 +349,6 @@ def main():
         print("UGV armed in GUIDED mode. Starting move...")
         drive_distance(vehicle, INITIAL_DISTANCE_M, SPEED_MPS)
         time.sleep(1.0)
-        turn_left(
-            vehicle,
-            TURN_ANGLE_DEG,
-            TURN_RATE_DEG_S,
-            flashing=False,
-            tolerance_deg=TURN_TOLERANCE_DEG
-        )
-        time.sleep(4.0)
 
         print("Move complete. Disarming...")
         vehicle.armed = False

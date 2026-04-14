@@ -10,7 +10,7 @@ CONNECTION_STRING = "/dev/ttyACM0"   # change to "udp:127.0.0.1:14551" for SITL 
 BAUD_RATE = 57600                     # serial speed for hardware connections
 
 # mission params
-TARGET_ALT = 1.3          # target hover height in meters
+TARGET_ALT = 2.3          # target hover height in meters
 HOVER_TIME_S = 8.0        # how long to hold altitude before landing
 ALT_TOL = 0.12            # acceptable altitude error band
 CLIMB_LOOP_DT = 0.10      # climb loop speed
@@ -269,6 +269,63 @@ class UAVCommander:
         print()
         self.log_event("Hover segment complete.")
 
+    def get_yaw(self, master):
+        msg = master.recv_match(type="GLOBAL_POSITION_INT", blocking=False)
+        while msg:
+            yaw = math.degrees(msg.hdg / 100.0)  # convert from centidegrees to degrees
+            return yaw
+        return None
+    
+    def change_yaw(self, master, turnRight = True):
+        self.log_event("Turning 90 degrees right...")
+        # This is a 'timed' turn since we aren't reading compass/IMU yet
+        # Adjust TURN_TIME based on your drone's sensitivity
+        TURN_TIME = 0.75 
+        TURN_DIRECTION = 1600 if turnRight else 1400  # 1600 for right, 1400 for left (assuming 1500 is neutral)
+        start = time.time()
+        while (time.time() - start) < TURN_TIME:
+            # CH4 is Yaw. 1500 is neutral, 1600 is right rotation
+            self.set_rc_override(master, yaw=TURN_DIRECTION, throttle=THROTTLE_HOVER)
+            print(f"Current yaw: {self.get_yaw(master):.1f} degrees", end="\r", flush=True)
+            time.sleep(0.1)
+        self.set_rc_override(master, yaw=THROTTLE_HOVER, throttle=THROTTLE_HOVER)
+
+    def move_pitch(self, master, forward = True, seconds = 1.5):
+        move_pwm = 1500
+        brake_pwm = 1500
+
+        if(forward):
+            direction = "forward"
+            move_pwm -= MOVEMENT_SPEED
+            brake_pwm += MOVEMENT_SPEED
+        else:
+            direction = "backwards"
+            move_pwm += MOVEMENT_SPEED
+            brake_pwm -= MOVEMENT_SPEED
+            
+        # 1. Tilt Forward
+        self.log_event(f"Moving {direction}...")
+        start_t = time.time()
+        while (time.time() - start_t) < seconds:
+            self.set_rc_override(master, pitch=move_pwm, throttle=THROTTLE_HOVER)
+            time.sleep(0.1)
+
+        # 2. Level Out
+        self.log_event("Leveling... (Coasting)")
+        self.set_rc_override(master, pitch=1500, throttle=THROTTLE_HOVER)
+        time.sleep(1.0) # Drone is still moving forward here!
+
+        # 3. Active Brake (Counter-Pitch)
+        self.log_event("Applying brakes...")
+        start_t = time.time()
+        while (time.time() - start_t) < 0.4:
+            self.set_rc_override(master, pitch=brake_pwm, throttle=THROTTLE_HOVER)
+            time.sleep(0.1)
+
+        # 4. Final Neutral
+        self.set_rc_override(master, pitch=1500, throttle=THROTTLE_HOVER)
+        self.log_event("Hovering at destination.")
+
 
     def land_safely(self, master):
         # switches to land mode and then BLOCKS until the cube's heartbeat confirms
@@ -302,3 +359,31 @@ class UAVCommander:
         self.disarm_drone(master)  # one last attempt to stop the motors
         time.sleep(2.0)  # give the cube a moment to process the disarm
         self.log_event("Disarm fallback sent. Assuming landed.")
+    
+    def connect(self):
+        self.log_event("==========================================")
+        self.log_event("   UAV MOVEMENT TEST + SAFE LAND MISSION")
+        self.log_event("==========================================")
+
+        self.log_event(f"Connecting to Drone: {CONNECTION_STRING}...")
+        if CONNECTION_STRING.startswith("udp:") or CONNECTION_STRING.startswith("tcp:"):
+            master = mavutil.mavlink_connection(CONNECTION_STRING)
+        else:
+            master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE)
+
+        hb = master.wait_heartbeat(timeout=10)
+        if not hb:
+            return None
+        self.log_event("Drone Heartbeat OK.")
+
+        self.request_message_streams(master)
+
+        return master
+    
+    def takeoff(self, master, target_alt=TARGET_ALT):
+        # step 1: start in stabilize like your mission 4 pattern
+        self.change_mode(master, "STABILIZE")
+        self.arm_drone(master)
+
+        # step 2: climb to the requested height
+        self.climb_to_target(master, target_alt)
