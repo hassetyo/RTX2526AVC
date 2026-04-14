@@ -867,7 +867,7 @@ def guideUGV(args, commander, estimator, cam):
         cam.close()
 
 ''' Tells the drone to move to the center of the grid and increase altitude until both markers are visible, then switch to the main navigation loop. This can help in cases where the markers are initially too close or partially out of frame.'''
-def moveToCenter(master, UAVcommander, estimator, cam, bottomRight = True):
+def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True):
     print("Moving to center of grid and looking for markers...")
     
     try:
@@ -905,9 +905,43 @@ def moveToCenter(master, UAVcommander, estimator, cam, bottomRight = True):
             draw_crosshair(display)
             estimator.draw_markers(display, poses)
 
-            if len(poses) >= 2:
+            pair = pick_two_markers(poses, args.ugv_marker_id, args.dest_marker_id)
+            if pair is not None:
                 draw_distance_overlay(display, *list(poses.values())[:2])
                 UAVcommander.log_event(f"markers detected! ids = {list(poses.keys())}")
+                ugv_pose, dest_pose = pair
+
+                draw_distance_overlay(display, ugv_pose, dest_pose)
+
+                forward_dir = get_marker_forward_direction_px(
+                    ugv_pose,
+                    cam.camera_matrix,
+                    cam.dist_coeffs,
+                    args.marker_size,
+                    args.ugv_forward_axis,
+                )
+                target_dir = np.array(
+                    [
+                        dest_pose.center_px[0] - ugv_pose.center_px[0],
+                        dest_pose.center_px[1] - ugv_pose.center_px[1],
+                    ],
+                    dtype=np.float64,
+                )
+                heading_error_deg = signed_angle_deg(forward_dir if forward_dir is not None else target_dir, target_dir)
+                dist_m = float(np.linalg.norm(dest_pose.tvec.reshape(3) - ugv_pose.tvec.reshape(3)))
+
+                draw_nav_overlay(
+                    display,
+                    ugv_pose,
+                    dest_pose,
+                    heading_error_deg,
+                    args.stop_distance_m,
+                    cam.camera_matrix,
+                    cam.dist_coeffs,
+                    args.marker_size,
+                    args.ugv_forward_axis,
+                )
+                
                 return True #markers are visible, switch to main navigation loop
             else:
                 if (currentAlt >= 5.0):
@@ -916,7 +950,6 @@ def moveToCenter(master, UAVcommander, estimator, cam, bottomRight = True):
                 UAVcommander.log_event("markers not detected, increasing altitude...")
                 UAVcommander.climb_to_target(master, target_alt= + 0.2)
                 time.sleep(2.0)
-
 
             cv2.imshow("ArUco Distance + UGV Navigation", display)
 
@@ -931,7 +964,7 @@ def main():
     cam, estimator, UGVcommander = initialize_system(args)
 
     if master is not None:
-        didItMove = moveToCenter(master, UAVcommander, estimator, cam)
+        didItMove = moveToCenter(master, UAVcommander, estimator, args, cam)
         if not didItMove:
             print("Failed to move to center and detect markers. Exiting.")
             return
