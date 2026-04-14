@@ -817,17 +817,18 @@ def guideUGV(args, commander, estimator, cam):
                     commander.send_forward_step(step_m)
 
                 draw_nav_overlay(
-                    display,
-                    ugv_pose,
-                    dest_pose,
-                    heading_error_deg,
-                    commander.last_status_text,
-                    args.stop_distance_m,
-                    cam.camera_matrix,
-                    cam.dist_coeffs,
-                    args.marker_size,
-                    args.ugv_forward_axis,
+                    frame=display,
+                    ugv_pose=ugv_pose,
+                    dest_pose=dest_pose,
+                    heading_error_deg=heading_error_deg,
+                    status_text=commander.last_status_text,  # Uses the actual UGV status
+                    stop_distance_m=args.stop_distance_m,
+                    camera_matrix=cam.camera_matrix,
+                    dist_coeffs=cam.dist_coeffs,
+                    marker_size_m=args.marker_size,
+                    forward_axis_name=args.ugv_forward_axis
                 )
+
             else:
                 commander.handle_marker_loss()
                 cv2.putText(
@@ -929,16 +930,16 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
                 dist_m = float(np.linalg.norm(dest_pose.tvec.reshape(3) - ugv_pose.tvec.reshape(3)))
 
                 draw_nav_overlay(
-                    display,
-                    ugv_pose,
-                    dest_pose,
-                    heading_error_deg,
-                    args.stop_distance_m,
-                    cam.camera_matrix,
-                    cam.dist_coeffs,
-                    args.marker_size,
-                    args.ugv_forward_axis,
-                    forward_axis_name #added
+                    frame=display,
+                    ugv_pose=ugv_pose,
+                    dest_pose=dest_pose,
+                    heading_error_deg=heading_error_deg,
+                    status_text="Markers Found - Centering", # Added this string
+                    stop_distance_m=args.stop_distance_m,
+                    camera_matrix=cam.camera_matrix,
+                    dist_coeffs=cam.dist_coeffs,
+                    marker_size_m=args.marker_size,
+                    forward_axis_name=args.ugv_forward_axis
                 )
                 
                 return True #markers are visible, switch to main navigation loop
