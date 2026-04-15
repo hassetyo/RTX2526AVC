@@ -35,8 +35,8 @@ BYPASS_FORWARD_DISTANCE_FT = 3.0
 SPEED_MPH                  = 0.8
 
 # Obstacle thresholds / offsets from your 3-sensor test
-ULTRASONIC_THRESHOLD_FT = 1.0
-LIDAR_THRESHOLD_FT      = 1.0
+ULTRASONIC_THRESHOLD_FT = 2.0
+LIDAR_THRESHOLD_FT      = 2.0
 
 LEFT_US_PRE_SHIFT_FT    = 1.0
 CENTER_LIDAR_PRE_SHIFT_FT = 2.0
