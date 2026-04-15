@@ -247,6 +247,16 @@ def get_lidar_distance_m():
         return float(msg.current_distance) / 100.0  # cm to meters
     return None
 
+def arm_with_timeout(master, timeout=10):
+    master.arducopter_arm()
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        if master.motors_armed():
+            print("Motors Armed!")
+            return True
+        time.sleep(0.1)
+    print("Failed to arm within timeout.")
+    return False
 
 def arm_and_takeoff(alt):
     print("Switching to GUIDED...")
@@ -256,8 +266,10 @@ def arm_and_takeoff(alt):
         raise RuntimeError(f"Vehicle never entered GUIDED mode (current: {master.flightmode})")
 
     print("Arming motors...")
-    master.arducopter_arm()
-    master.motors_armed_wait()
+    isArmed = arm_with_timeout(master, timeout=10)
+    if not isArmed:
+        raise RuntimeError("Failed to arm motors, cannot takeoff")
+    
     print("Armed! Sending takeoff command...")
     master.mav.command_long_send(
         master.target_system, master.target_component,
@@ -328,6 +340,10 @@ def main():
                 elif latest_alt_m is not None and latest_alt_m >= (TARGET_HEIGHT_M - TAKEOFF_ALT_TOLERANCE_M):
                     print(f">>> Takeoff altitude reached ({latest_alt_m:.2f} m). Starting ArUco centering.")
                     state = "APPROACH"
+                
+                '''
+                This is where my code should be put for centering and guidance of the UGV - Sam
+                '''
 
                 cv2.putText(frame, f"MODE: {state}", (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
                 cv2.imshow("Precision Landing", frame)
