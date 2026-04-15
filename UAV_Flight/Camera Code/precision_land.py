@@ -216,16 +216,6 @@ def get_lidar_distance_m():
         return float(msg.current_distance) / 100.0  # cm to meters
     return None
 
-def arm_and_takeoff(alt):
-    print("Arming motors...")
-    master.arducopter_arm()
-    master.motors_armed_wait()
-    print("Armed! Taking off...")
-    master.mav.command_long_send(
-        master.target_system, master.target_component,
-        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, 0, 0, 0, 0, alt
-    )
-
 def land_safely_on_interrupt():
     print("Keyboard interrupt received. Switching to LAND mode...")
 
@@ -234,8 +224,83 @@ def land_safely_on_interrupt():
             print("Failed to switch to LAND mode.")
             return
 
+        if not wait_for_mode("LAND", timeout=5.0):
+            print("Vehicle did not confirm LAND mode.")
+        else:
+            print("LAND mode confirmed.")
+
+        timeout = time.time() + 45
+        while time.time() < timeout:
+            if not master.motors_armed():
+                print("Landing complete. Motors disarmed.")
+                return
+            time.sleep(0.5)
+
+        print("Timeout waiting for motors to disarm.")
+
     except Exception as e:
         print(f"Error during interrupt landing: {e}")
+
+def wait_for_mode(mode_name: str, timeout: float = 10.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        msg = master.recv_match(type='HEARTBEAT', blocking=True, timeout=1)
+        if msg is not None:
+            current_mode = mavutil.mode_string_v10(msg)
+            if current_mode == mode_name:
+                return True
+    return False
+
+
+def get_relative_altitude_m() -> Optional[float]:
+    msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=False)
+    if msg is not None:
+        return float(msg.relative_alt) / 1000.0
+    return None
+
+
+def arm_and_takeoff(alt, timeout: float = 30.0):
+    print("Switching to GUIDED...")
+    if not change_mode("GUIDED"):
+        raise RuntimeError("Failed to request GUIDED mode")
+
+    if not wait_for_mode("GUIDED", timeout=10.0):
+        raise RuntimeError("Vehicle did not enter GUIDED mode")
+
+    print("Arming motors...")
+    master.arducopter_arm()
+    master.motors_armed_wait()
+    print("Armed!")
+
+    time.sleep(1.0)
+
+    print(f"Sending takeoff command to {alt:.2f} m...")
+    master.mav.command_long_send(
+        master.target_system,
+        master.target_component,
+        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+        0,
+        0, 0, 0, 0, 0, 0, alt
+    )
+
+    start = time.time()
+    last_alt_print = 0.0
+
+    while time.time() - start < timeout:
+        alt_now = get_relative_altitude_m()
+
+        if alt_now is not None:
+            if time.time() - last_alt_print > 0.5:
+                print(f"Current relative altitude: {alt_now:.2f} m")
+                last_alt_print = time.time()
+
+            if alt_now >= alt * 0.90:
+                print("Takeoff complete, altitude reached.")
+                return
+
+        time.sleep(0.2)
+
+    raise RuntimeError("Takeoff failed or timed out before reaching target altitude")
         
 # ─── MAIN PROGRAM ──────────────────────────────────────────────────────────────
 def main():
@@ -267,9 +332,8 @@ def main():
             print(">>> 2. The script will rip the sticks from your hand virtually!")
         else:
             print(">>> [✓] REAL FLIGHT MODE ACTIVE (GPS-DENIED SAFE VELOCITY CONTROLLER)")
-            print(">>> Drone taking off in GUIDED -> Forcing Visual Center -> LAND.")
+            print(">>> Drone taking off in GUIDED -> climb to target altitude -> begin tracking.")
             print(">>> Back away from the drone quickly!")
-            change_mode("GUIDED")
             arm_and_takeoff(TARGET_HEIGHT_M)
         print("=================================================================")
         
