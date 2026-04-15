@@ -227,29 +227,21 @@ def arm_and_takeoff(alt):
     )
 
 def land_safely_on_interrupt():
-    print("Keyboard interrupt received.")
+    print("Keyboard interrupt received. Switching to LAND mode...")
 
     try:
-        print("REAL FLIGHT MODE: landing safely...")
-        send_guided_velocity(0.0, 0.0, 0.0)
-        time.sleep(0.2)
-
-        change_mode("LAND")
-        print("LAND mode change failed, sending MAV_CMD_NAV_LAND...")
-        master.mav.command_long_send(
-            master.target_system,
-            master.target_component,
-            mavutil.mavlink.MAV_CMD_NAV_LAND,
-            0,
-            0, 0, 0, 0, 0, 0, 0
-        )
+        if not change_mode("LAND"):
+            print("Failed to switch to LAND mode.")
+            return
 
         timeout = time.time() + 30
         while time.time() < timeout:
             if not master.motors_armed():
                 print("Landing complete. Motors disarmed.")
-                break
+                return
             time.sleep(0.5)
+
+        print("Timeout waiting for motors to disarm.")
 
     except Exception as e:
         print(f"Error during interrupt landing: {e}")
