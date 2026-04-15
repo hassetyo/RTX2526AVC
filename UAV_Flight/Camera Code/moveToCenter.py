@@ -954,7 +954,7 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
                     print("markers not detected, increasing altitude... (TESTING MODE - skipping actual climb)")
                 else:
                     UAVcommander.climb_to_target(master, target_alt= + 0.2)
-                    time.sleep(2.0)
+                    time.sleep(0.1)
 
             cv2.imshow("ArUco Distance + UGV Navigation", display)
 
