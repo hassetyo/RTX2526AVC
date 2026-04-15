@@ -228,7 +228,7 @@ class UAVCommander:
             alt = self.print_altitude(master, prefix="Climb Alt")
 
             if alt is None:
-                self.set_throttle(master, THROTTLE_IDLE)
+                self.set_throttle(master, THROTTLE_HOVER)
                 time.sleep(CLIMB_LOOP_DT)
                 continue
 
