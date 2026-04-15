@@ -234,7 +234,7 @@ def land_safely_on_interrupt():
         send_guided_velocity(0.0, 0.0, 0.0)
         time.sleep(0.2)
 
-        change_mode("LAND"):
+        change_mode("LAND")
         print("LAND mode change failed, sending MAV_CMD_NAV_LAND...")
         master.mav.command_long_send(
             master.target_system,
