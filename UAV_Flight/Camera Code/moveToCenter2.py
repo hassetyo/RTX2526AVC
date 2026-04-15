@@ -968,6 +968,13 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight=True):
         print("Finished moveToCenter sequence.")
         FAIL_COUNT = 0
 
+def endCode(master, UAVcommander, UGVcommander, cam):
+    print("Ending program and landing drone safely...")
+    time.sleep(2.0)
+    UAVcommander.land_safely(master)
+    cam.close()
+    UGVcommander.close()
+
 def main():
     try:
         UAVcommander = UAVboss.UAVCommander()
