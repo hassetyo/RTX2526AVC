@@ -234,15 +234,6 @@ def land_safely_on_interrupt():
             print("Failed to switch to LAND mode.")
             return
 
-        timeout = time.time() + 30
-        while time.time() < timeout:
-            if not master.motors_armed():
-                print("Landing complete. Motors disarmed.")
-                return
-            time.sleep(0.5)
-
-        print("Timeout waiting for motors to disarm.")
-
     except Exception as e:
         print(f"Error during interrupt landing: {e}")
         
