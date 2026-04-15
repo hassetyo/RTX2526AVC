@@ -425,5 +425,19 @@ class UAVCommander:
         self.arm_drone(master)
         self.change_mode(master, "GUIDED")
 
-        # step 2: climb to the requested height
-        self.climb_to_target(master, target_alt)
+        isArmed = master.motors_armed()
+        if not isArmed:
+            self.log_event("Failed to arm motors. Check connection and try again.")
+            return False
+
+        # step 2: send takeoff command with desired altitude
+        master.mav.command_long_send(
+            master.target_system, master.target_component,
+            mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
+            0, 0, 0, 0, 0, 0, target_alt
+        )
+        
+        currentAlt = master.get_altitude()
+        if currentAlt >= (target_alt * 0.8):
+            self.log_event(f"Takeoff successful, current altitude: {currentAlt:.2f} m")
+            return True
