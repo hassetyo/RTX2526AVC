@@ -230,39 +230,19 @@ def land_safely_on_interrupt():
     print("Keyboard interrupt received.")
 
     try:
-        if DESK_TESTING_NO_PROPELLERS:
-            print("DESK TEST MODE: simulating landing sequence...")
-
-            # Step 1: stop lateral correction and hold a soft hover-like command briefly
-            send_rc_override(roll=1500, pitch=1500, throttle=1500, yaw=1500)
-            time.sleep(0.8)
-
-            # Step 2: simulate descent by lowering throttle a bit
-            send_rc_override(roll=1500, pitch=1500, throttle=1450, yaw=1500)
-            time.sleep(1.0)
-
-            # Step 3: simulate touchdown by lowering a bit more
-            send_rc_override(roll=1500, pitch=1500, throttle=1400, yaw=1500)
-            time.sleep(0.8)
-
-            # Step 4: release control back to autopilot / neutral state
-            release_rc_override()
-            print("Simulated landing complete.")
-            return
-
         print("REAL FLIGHT MODE: landing safely...")
         send_guided_velocity(0.0, 0.0, 0.0)
         time.sleep(0.2)
 
-        if not change_mode("LAND"):
-            print("LAND mode change failed, sending MAV_CMD_NAV_LAND...")
-            master.mav.command_long_send(
-                master.target_system,
-                master.target_component,
-                mavutil.mavlink.MAV_CMD_NAV_LAND,
-                0,
-                0, 0, 0, 0, 0, 0, 0
-            )
+        change_mode("LAND"):
+        print("LAND mode change failed, sending MAV_CMD_NAV_LAND...")
+        master.mav.command_long_send(
+            master.target_system,
+            master.target_component,
+            mavutil.mavlink.MAV_CMD_NAV_LAND,
+            0,
+            0, 0, 0, 0, 0, 0, 0
+        )
 
         timeout = time.time() + 30
         while time.time() < timeout:
