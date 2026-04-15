@@ -950,10 +950,9 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight = True)
                 if (currentAlt >= 5.0):
                     print("Reached maximum altitude but still cannot see both markers.")
                     return 0
-                if testing:
+                if not testing:
                     print("markers not detected, increasing altitude... (TESTING MODE - skipping actual climb)")
                 else:
-                    UAVcommander.log_event("markers not detected, increasing altitude...")
                     UAVcommander.climb_to_target(master, target_alt= + 0.2)
                     time.sleep(2.0)
 

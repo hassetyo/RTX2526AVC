@@ -1,5 +1,5 @@
 '''Will tell the drone to move to the center of the 15x15 yard grid and rise until both aruco markers are visible for a set amount of time.'''
-#python3 moveToCenter.py --use-zed --ugv-marker-id 5 --dest-marker-id 0 --calibration ../calibration_chessboard.yaml --bridge-port /dev/ttyUSB0 --stop-distance-m 0.05 --drive-speed-mps 0.5 
+#python3 moveToCenter2.py --use-zed --ugv-marker-id 5 --dest-marker-id 0 --calibration ../calibration_chessboard.yaml --bridge-port /dev/ttyUSB0 --stop-distance-m 0.05 --drive-speed-mps 0.5 
 
 import argparse
 import math
@@ -13,6 +13,7 @@ import numpy as np
 
 import v2v_bridge
 import UAVcommander as UAVboss
+
 testing = True
 ALTITUDE = 0.3 if testing else 2.3
 FAIL_COUNT = 0
