@@ -876,6 +876,104 @@ def moveToCenter(master, UAVcommander, estimator, cam, args, bottomRight=True):
     try:
         FAIL_COUNT = 0
 
+        # Distance from corner -> center of a 15x15 yard field
+        distance_to_center_m = (15.0 / math.sqrt(2.0)) * 0.9144
+
+        forward_speed_mps = 1.5
+        total_time = distance_to_center_m / forward_speed_mps
+
+        step_time = 0.5   # seconds per forward step
+        steps = int(total_time / step_time)
+
+        climb_step = 0.1  # meters per loop
+
+        for step in range(steps):
+            frame = cam.get_frame()
+
+            if frame is None:
+                print("Failed to read frame.")
+                FAIL_COUNT += 1
+                if FAIL_COUNT > 5:
+                    print("Too many camera failures.")
+                    return 0
+                continue
+
+            poses = estimator.detect_markers(frame)
+
+            pair = pick_two_markers(poses, args.ugv_marker_id, args.dest_marker_id)
+
+            # If both markers found -> hover immediately
+            if pair is not None:
+                ugv_pose, dest_pose = pair
+
+                UAVcommander.log_event(f"Markers detected! ids = {list(poses.keys())}")
+                print(f"Both markers found: UGV={ugv_pose.marker_id}, DEST={dest_pose.marker_id}")
+                print("UAV entering hover mode now.")
+                UAVcommander.log_event("Markers found -> UAV hovering")
+                return 1
+
+            # If not found, keep climbing slowly while moving toward center
+            currentAlt = UAVcommander.print_altitude(master)
+
+            if currentAlt < 5.0:
+                if testing:
+                    print(f"TESTING MODE: would climb from {currentAlt:.2f} m to {currentAlt + climb_step:.2f} m")
+                else:
+                    UAVcommander.climb_to_target(master, target_alt=currentAlt + climb_step)
+
+            UAVcommander.move_pitch(master, forward=True, seconds=step_time)
+
+        print("Reached center but did not detect markers.")
+
+        # After reaching center, keep climbing and searching
+        while True:
+            frame = cam.get_frame()
+
+            if frame is None:
+                print("Failed to read frame.")
+                FAIL_COUNT += 1
+                if FAIL_COUNT > 5:
+                    print("Too many camera failures.")
+                    return 0
+                continue
+
+            poses = estimator.detect_markers(frame)
+            pair = pick_two_markers(poses, args.ugv_marker_id, args.dest_marker_id)
+
+            if pair is not None:
+                ugv_pose, dest_pose = pair
+                print(f"Both markers found: UGV={ugv_pose.marker_id}, DEST={dest_pose.marker_id}")
+                print("UAV entering hover mode now.")
+                UAVcommander.log_event("Markers found after reaching center -> UAV hovering")
+                return 1
+
+            currentAlt = UAVcommander.print_altitude(master)
+
+            if currentAlt >= 5.0:
+                print("Max altitude reached, markers not found.")
+                return 0
+
+            if testing:
+                print(f"TESTING MODE: would climb from {currentAlt:.2f} m to {currentAlt + climb_step:.2f} m")
+            else:
+                UAVcommander.climb_to_target(master, target_alt=currentAlt + climb_step)
+
+            time.sleep(1.0)
+
+    except KeyboardInterrupt:
+        print("Keyboard interrupt received.")
+        return -1
+
+    finally:
+        print("Finished moveToCenter sequence.")
+        FAIL_COUNT = 0
+    global FAIL_COUNT
+
+    print("Moving toward center while climbing and searching for markers...")
+
+    try:
+        FAIL_COUNT = 0
+
         # Distance from corner → center
         distance_to_center_m = (15.0 / math.sqrt(2.0)) * 0.9144
 
