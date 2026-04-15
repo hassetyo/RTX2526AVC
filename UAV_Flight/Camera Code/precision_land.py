@@ -226,179 +226,221 @@ def arm_and_takeoff(alt):
         mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, 0, 0, 0, 0, alt
     )
 
-# ─── MAIN PROGRAM ──────────────────────────────────────────────────────────────
-def main():
-    # Attempt ZED first to prevent v4l2 OpenCV timeout crash
-    USE_ZED = True  
-    yaml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calibration_chessboard.yaml")
-    
-    # Intentionally initialize camera flawlessly using Friend's script wrapper
+def land_safely_on_interrupt():
+    print("Keyboard interrupt received. Landing safely...")
+
     try:
-        # Toggle USE_ZED=True if you prefer ZED natively
-        cam = CameraInterface(use_zed=USE_ZED, camera_index=0, fps=30)
-        cam.load_standard_calibration(yaml_path)
-    except Exception as e:
-        print(f"Failed to open camera: {e}")
-        return
-
-    estimator = ArucoDistanceEstimator(cam.camera_matrix, cam.dist_coeffs, aruco.DICT_6X6_1000)
-
-    state = "APPROACH"
-    stable_count = 0
-    last_send = 0.0
-
-    print("=================================================================")
-    if DESK_TESTING_NO_PROPELLERS:
-        print(">>> [WARNING] DESK TESTING MODE ACTIVE (NO PROPS)")
-        print(">>> Hijacking raw RC limits to force motors to spin on your desk.")
-        print(">>> 1. Put drone in ALT_HOLD and forcefully push throttle up via your RC.")
-        print(">>> 2. The script will rip the sticks from your hand virtually!")
-    else:
-        print(">>> [✓] REAL FLIGHT MODE ACTIVE (GPS-DENIED SAFE VELOCITY CONTROLLER)")
-        print(">>> Drone taking off in GUIDED -> Forcing Visual Center -> LAND.")
-        print(">>> Back away from the drone quickly!")
-        change_mode("GUIDED")
-        arm_and_takeoff(TARGET_HEIGHT_M)
-    print("=================================================================")
-    
-    try:
-        while True:
-            frame = cam.get_frame()
-            if frame is None:
-                continue
-
-            draw_crosshair(frame)
-
-            # Detect all markers, using Large Marker size to start
-            poses = estimator.detect_markers(frame, LARGE_MARKER_SIZE)
-            
-            found = False
-            target_eb = None
-            marker_id_to_use = None
-            marker_size_m_to_use = None
-
-            # Priority 1: Check if the Small Marker is visible
-            if SMALL_MARKER_ID in poses:
-                # Re-estimate properly with small marker size
-                poses = estimator.detect_markers(frame, SMALL_MARKER_SIZE)
-                if SMALL_MARKER_ID in poses:
-                    marker_id_to_use = SMALL_MARKER_ID
-                    marker_size_m_to_use = SMALL_MARKER_SIZE
-            # Priority 2: Fallback to Large Marker
-            elif LARGE_MARKER_ID in poses:
-                marker_id_to_use = LARGE_MARKER_ID
-                marker_size_m_to_use = LARGE_MARKER_SIZE
-
-            if marker_id_to_use is not None and marker_id_to_use in poses:
-                pose = poses[marker_id_to_use]
-                # Convert ZED/Webcam standard frame XYZ to ArduPilot FRD body frame
-                x_cam, y_cam, z_cam = float(pose.tvec[0]), float(pose.tvec[1]), float(pose.tvec[2])
-                x_b = -y_cam  # Forward
-                y_b = x_cam   # Right
-                z_b = z_cam   # Down
-                target_eb = (x_b, y_b, z_b)
-
-                # 1. Visualization: Draw targeting line from camera center to marker center
-                cam_cx, cam_cy = frame.shape[1] // 2, frame.shape[0] // 2
-                marker_cx, marker_cy = pose.center_px
-                cv2.line(frame, (cam_cx, cam_cy), (marker_cx, marker_cy), (0, 0, 255), 4)
-                
-                stable_count += 1
-                found = True
-
-                corners_arr = [pose.corners.reshape(1, 4, 2).astype(np.float32)]
-                aruco.drawDetectedMarkers(frame, corners_arr, np.array([[marker_id_to_use]]))
-                cv2.drawFrameAxes(frame, cam.camera_matrix, cam.dist_coeffs, pose.rvec, pose.tvec.reshape(3, 1), marker_size_m_to_use * 0.5)
-
-                cv2.putText(frame, f"TRACKING ID: {marker_id_to_use}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(frame, f"XYZ: [{x_b:.2f}, {y_b:.2f}, {z_b:.2f}]", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-                now = time.time()
-                if now - last_send >= (1.0 / SEND_HZ):
-                    if DESK_TESTING_NO_PROPELLERS:
-                        req_roll = max(1300, min(1700, 1500 + int(y_b * 200.0)))
-                        req_pitch = max(1300, min(1700, 1500 - int(x_b * 200.0)))
-                        send_rc_override(roll=req_roll, pitch=req_pitch, throttle=1550)
-                    else:
-                        # Flight mode safe controller! Extremely similar to your friend's 
-                        # moveToCenter2.py script. Command velocity directly in GUIDED mode!
-                        if state in ["APPROACH", "PREC_LOITER", "LANDING"]:
-                            Kp = 0.8
-                            vx = float(x_b) * Kp
-                            vy = float(y_b) * Kp
-                            
-                            # Hard clamp safety speeds (0.8 m/sec is walking pace)
-                            vx = max(-0.8, min(0.8, vx))
-                            vy = max(-0.8, min(0.8, vy))
-                            vz = 0.0
-                            
-                            if state == "LANDING":
-                                # Utilize Lidar Lite V3 to dynamically adjust descent safely!
-                                lidar_m = get_lidar_distance_m()
-                                if lidar_m is not None:
-                                    # Scale speed smoothly using laser altitude! 
-                                    # Very slow (0.1m/s) if < 1m to gently kiss the platform.
-                                    # Max speed (0.4m/s) if higher up.
-                                    vz = max(0.15, min(0.4, lidar_m * 0.3))
-                                    cv2.putText(frame, f"LIDAR Z: {lidar_m:.2f}m", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                                else:
-                                    vz = 0.4 # Fallback
-                                    cv2.putText(frame, "LIDAR N/A - BLIND DESCENT", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                            
-                            send_guided_velocity(vx, vy, vz)
-                            send_landing_target(x_b, y_b, z_b) # Supplement the math for EKF logging
-                        
-                    last_send = now
-
-            else:
-                stable_count = 0
-                now = time.time()
-                if now - last_send >= (1.0 / SEND_HZ):
-                    if DESK_TESTING_NO_PROPELLERS:
-                        cv2.putText(frame, "TARGET LOST - STICKS CENTERED", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        send_rc_override(1500, 1500, 1500, 1500)
-                    else:
-                        cv2.putText(frame, "TARGET LOST - BRAKING TO HOVER", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        send_guided_velocity(0.0, 0.0, 0.0) # Break and hover!
-                    last_send = now
-            # STATE MACHINE (Transitions)
-            if state == "APPROACH":
-                if stable_count >= PLND_STABLE_FRAMES:
-                    print(">>> Target stably held. Engaging GUIDED Velocity Tracking!")
-                    change_mode("GUIDED")
-                    state = "PREC_LOITER"
-            
-            elif state == "PREC_LOITER":
-                if stable_count == 0:
-                    state = "APPROACH"  
-                elif found and target_eb is not None:
-                    err_m = math.sqrt(target_eb[0]**2 + target_eb[1]**2)
-                    cv2.putText(frame, f"Align Err: {err_m:.2f}m", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                    
-                    if err_m < LAND_LATERAL_ERR_M:
-                        print(">>> Aligned flawlessly! Engaging Direct Velocity Descent!")
-                        # Notice we STAY in GUIDED mode!
-                        state = "LANDING"
-            
-            elif state == "LANDING":
-                # Wait for Touchdown
-                if not master.motors_armed():
-                    print(">>> TOUCHDOWN AUTO-DISARM CONFIRMED. LANDING COMPLETE.")
-                    state = "LANDED"
-                    break
-            
-            cv2.putText(frame, f"MODE: {state}", (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
-            cv2.imshow("Precision Landing", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
-    finally:
-        print("Cleaning up system...")
         if DESK_TESTING_NO_PROPELLERS:
             release_rc_override()
+            print("Desk testing mode: released RC override only.")
+            return
+
+        # Stop any current motion first
+        send_guided_velocity(0.0, 0.0, 0.0)
+        time.sleep(0.2)
+
+        # Tell ArduPilot to land
+        if not change_mode("LAND"):
+            print("Failed to switch to LAND mode, sending MAV_CMD_NAV_LAND...")
+            master.mav.command_long_send(
+                master.target_system,
+                master.target_component,
+                mavutil.mavlink.MAV_CMD_NAV_LAND,
+                0,
+                0, 0, 0, 0, 0, 0, 0
+            )
+
+        # Optional: wait until motors disarm
+        timeout = time.time() + 30
+        while time.time() < timeout:
+            if not master.motors_armed():
+                print("Landing complete. Motors disarmed.")
+                break
+            time.sleep(0.5)
+
+    except Exception as e:
+        print(f"Error during safe landing: {e}")
+
+# ─── MAIN PROGRAM ──────────────────────────────────────────────────────────────
+def main():
+    try:
+        # Attempt ZED first to prevent v4l2 OpenCV timeout crash
+        USE_ZED = True  
+        yaml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calibration_chessboard.yaml")
+        
+        # Intentionally initialize camera flawlessly using Friend's script wrapper
+        try:
+            # Toggle USE_ZED=True if you prefer ZED natively
+            cam = CameraInterface(use_zed=USE_ZED, camera_index=0, fps=30)
+            cam.load_standard_calibration(yaml_path)
+        except Exception as e:
+            print(f"Failed to open camera: {e}")
+            return
+
+        estimator = ArucoDistanceEstimator(cam.camera_matrix, cam.dist_coeffs, aruco.DICT_6X6_1000)
+
+        state = "APPROACH"
+        stable_count = 0
+        last_send = 0.0
+
+        print("=================================================================")
+        if DESK_TESTING_NO_PROPELLERS:
+            print(">>> [WARNING] DESK TESTING MODE ACTIVE (NO PROPS)")
+            print(">>> Hijacking raw RC limits to force motors to spin on your desk.")
+            print(">>> 1. Put drone in ALT_HOLD and forcefully push throttle up via your RC.")
+            print(">>> 2. The script will rip the sticks from your hand virtually!")
         else:
-            send_guided_velocity(0.0, 0.0, 0.0) # Hover brake!
-        cam.close()
+            print(">>> [✓] REAL FLIGHT MODE ACTIVE (GPS-DENIED SAFE VELOCITY CONTROLLER)")
+            print(">>> Drone taking off in GUIDED -> Forcing Visual Center -> LAND.")
+            print(">>> Back away from the drone quickly!")
+            change_mode("GUIDED")
+            arm_and_takeoff(TARGET_HEIGHT_M)
+        print("=================================================================")
+        
+        try:
+            while True:
+                frame = cam.get_frame()
+                if frame is None:
+                    continue
+
+                draw_crosshair(frame)
+
+                # Detect all markers, using Large Marker size to start
+                poses = estimator.detect_markers(frame, LARGE_MARKER_SIZE)
+                
+                found = False
+                target_eb = None
+                marker_id_to_use = None
+                marker_size_m_to_use = None
+
+                # Priority 1: Check if the Small Marker is visible
+                if SMALL_MARKER_ID in poses:
+                    # Re-estimate properly with small marker size
+                    poses = estimator.detect_markers(frame, SMALL_MARKER_SIZE)
+                    if SMALL_MARKER_ID in poses:
+                        marker_id_to_use = SMALL_MARKER_ID
+                        marker_size_m_to_use = SMALL_MARKER_SIZE
+                # Priority 2: Fallback to Large Marker
+                elif LARGE_MARKER_ID in poses:
+                    marker_id_to_use = LARGE_MARKER_ID
+                    marker_size_m_to_use = LARGE_MARKER_SIZE
+
+                if marker_id_to_use is not None and marker_id_to_use in poses:
+                    pose = poses[marker_id_to_use]
+                    # Convert ZED/Webcam standard frame XYZ to ArduPilot FRD body frame
+                    x_cam, y_cam, z_cam = float(pose.tvec[0]), float(pose.tvec[1]), float(pose.tvec[2])
+                    x_b = -y_cam  # Forward
+                    y_b = x_cam   # Right
+                    z_b = z_cam   # Down
+                    target_eb = (x_b, y_b, z_b)
+
+                    # 1. Visualization: Draw targeting line from camera center to marker center
+                    cam_cx, cam_cy = frame.shape[1] // 2, frame.shape[0] // 2
+                    marker_cx, marker_cy = pose.center_px
+                    cv2.line(frame, (cam_cx, cam_cy), (marker_cx, marker_cy), (0, 0, 255), 4)
+                    
+                    stable_count += 1
+                    found = True
+
+                    corners_arr = [pose.corners.reshape(1, 4, 2).astype(np.float32)]
+                    aruco.drawDetectedMarkers(frame, corners_arr, np.array([[marker_id_to_use]]))
+                    cv2.drawFrameAxes(frame, cam.camera_matrix, cam.dist_coeffs, pose.rvec, pose.tvec.reshape(3, 1), marker_size_m_to_use * 0.5)
+
+                    cv2.putText(frame, f"TRACKING ID: {marker_id_to_use}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.putText(frame, f"XYZ: [{x_b:.2f}, {y_b:.2f}, {z_b:.2f}]", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                    now = time.time()
+                    if now - last_send >= (1.0 / SEND_HZ):
+                        if DESK_TESTING_NO_PROPELLERS:
+                            req_roll = max(1300, min(1700, 1500 + int(y_b * 200.0)))
+                            req_pitch = max(1300, min(1700, 1500 - int(x_b * 200.0)))
+                            send_rc_override(roll=req_roll, pitch=req_pitch, throttle=1550)
+                        else:
+                            # Flight mode safe controller! Extremely similar to your friend's 
+                            # moveToCenter2.py script. Command velocity directly in GUIDED mode!
+                            if state in ["APPROACH", "PREC_LOITER", "LANDING"]:
+                                Kp = 0.8
+                                vx = float(x_b) * Kp
+                                vy = float(y_b) * Kp
+                                
+                                # Hard clamp safety speeds (0.8 m/sec is walking pace)
+                                vx = max(-0.8, min(0.8, vx))
+                                vy = max(-0.8, min(0.8, vy))
+                                vz = 0.0
+                                
+                                if state == "LANDING":
+                                    # Utilize Lidar Lite V3 to dynamically adjust descent safely!
+                                    lidar_m = get_lidar_distance_m()
+                                    if lidar_m is not None:
+                                        # Scale speed smoothly using laser altitude! 
+                                        # Very slow (0.1m/s) if < 1m to gently kiss the platform.
+                                        # Max speed (0.4m/s) if higher up.
+                                        vz = max(0.15, min(0.4, lidar_m * 0.3))
+                                        cv2.putText(frame, f"LIDAR Z: {lidar_m:.2f}m", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                                    else:
+                                        vz = 0.4 # Fallback
+                                        cv2.putText(frame, "LIDAR N/A - BLIND DESCENT", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                                
+                                send_guided_velocity(vx, vy, vz)
+                                send_landing_target(x_b, y_b, z_b) # Supplement the math for EKF logging
+                            
+                        last_send = now
+
+                else:
+                    stable_count = 0
+                    now = time.time()
+                    if now - last_send >= (1.0 / SEND_HZ):
+                        if DESK_TESTING_NO_PROPELLERS:
+                            cv2.putText(frame, "TARGET LOST - STICKS CENTERED", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            send_rc_override(1500, 1500, 1500, 1500)
+                        else:
+                            cv2.putText(frame, "TARGET LOST - BRAKING TO HOVER", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            send_guided_velocity(0.0, 0.0, 0.0) # Break and hover!
+                        last_send = now
+                # STATE MACHINE (Transitions)
+                if state == "APPROACH":
+                    if stable_count >= PLND_STABLE_FRAMES:
+                        print(">>> Target stably held. Engaging GUIDED Velocity Tracking!")
+                        change_mode("GUIDED")
+                        state = "PREC_LOITER"
+                
+                elif state == "PREC_LOITER":
+                    if stable_count == 0:
+                        state = "APPROACH"  
+                    elif found and target_eb is not None:
+                        err_m = math.sqrt(target_eb[0]**2 + target_eb[1]**2)
+                        cv2.putText(frame, f"Align Err: {err_m:.2f}m", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                        
+                        if err_m < LAND_LATERAL_ERR_M:
+                            print(">>> Aligned flawlessly! Engaging Direct Velocity Descent!")
+                            # Notice we STAY in GUIDED mode!
+                            state = "LANDING"
+                
+                elif state == "LANDING":
+                    # Wait for Touchdown
+                    if not master.motors_armed():
+                        print(">>> TOUCHDOWN AUTO-DISARM CONFIRMED. LANDING COMPLETE.")
+                        state = "LANDED"
+                        break
+                
+                cv2.putText(frame, f"MODE: {state}", (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                cv2.imshow("Precision Landing", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+
+        finally:
+            print("Cleaning up system...")
+            try:
+                if DESK_TESTING_NO_PROPELLERS:
+                    release_rc_override()
+            except Exception:
+                pass
+
+            if cam is not None:
+                cam.close()
+    except KeyboardInterrupt:
+        land_safely_on_interrupt()
+        return
 
 if __name__ == "__main__":
     main()
