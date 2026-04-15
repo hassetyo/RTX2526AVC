@@ -33,6 +33,9 @@ SEND_HZ = 15.0
 
 # Flight Logic
 TARGET_HEIGHT_M = 2.0
+TAKEOFF_ALT_TOLERANCE_M = 0.25   # Start vision movement once we are within this band of target alt
+TAKEOFF_MIN_CLIMB_M = 0.15       # Consider the vehicle airborne once it has climbed at least this much
+TAKEOFF_TIMEOUT_S = 20.0
 PLND_STABLE_FRAMES = 15   # Frames of solid tracking before engaging Precision Loiter
 LAND_LATERAL_ERR_M = 0.20 # Meters of allowed lateral error before switching to LAND
 
@@ -205,9 +208,37 @@ def release_rc_override():
 
 def change_mode(mode_name: str):
     mode_id = master.mode_mapping().get(mode_name)
-    if mode_id is None: return False
+    if mode_id is None:
+        return False
     master.set_mode(mode_id)
     return True
+
+
+def wait_for_mode(mode_name: str, timeout: float = 8.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        master.recv_match(type='HEARTBEAT', blocking=True, timeout=1.0)
+        if master.flightmode == mode_name:
+            return True
+    return False
+
+
+def get_relative_alt_m():
+    """Best-effort relative altitude using autopilot telemetry."""
+    msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=False)
+    if msg is not None and hasattr(msg, 'relative_alt'):
+        return float(msg.relative_alt) / 1000.0  # mm -> m
+
+    msg = master.recv_match(type='LOCAL_POSITION_NED', blocking=False)
+    if msg is not None and hasattr(msg, 'z'):
+        return float(-msg.z)
+
+    msg = master.recv_match(type='VFR_HUD', blocking=False)
+    if msg is not None and hasattr(msg, 'alt'):
+        return float(msg.alt)
+
+    return None
+
 
 def get_lidar_distance_m():
     """ Actively pulls hardware pings from the Lidar Lite V3 """
@@ -216,14 +247,22 @@ def get_lidar_distance_m():
         return float(msg.current_distance) / 100.0  # cm to meters
     return None
 
+
 def arm_and_takeoff(alt):
+    print("Switching to GUIDED...")
+    if not change_mode("GUIDED"):
+        raise RuntimeError("GUIDED mode is not available on this vehicle")
+    if not wait_for_mode("GUIDED", timeout=8.0):
+        raise RuntimeError(f"Vehicle never entered GUIDED mode (current: {master.flightmode})")
+
     print("Arming motors...")
     master.arducopter_arm()
     master.motors_armed_wait()
-    print("Armed! Taking off...")
+    print("Armed! Sending takeoff command...")
     master.mav.command_long_send(
         master.target_system, master.target_component,
-        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, 0, 0, 0, 0, alt
+        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
+        0, 0, 0, 0, 0, 0, alt
     )
 
 # ─── MAIN PROGRAM ──────────────────────────────────────────────────────────────
@@ -243,9 +282,12 @@ def main():
 
     estimator = ArucoDistanceEstimator(cam.camera_matrix, cam.dist_coeffs, aruco.DICT_6X6_1000)
 
-    state = "APPROACH"
+    state = "APPROACH" if DESK_TESTING_NO_PROPELLERS else "TAKEOFF"
     stable_count = 0
     last_send = 0.0
+    takeoff_started = DESK_TESTING_NO_PROPELLERS
+    takeoff_start_time = None
+    latest_alt_m = None
 
     print("=================================================================")
     if DESK_TESTING_NO_PROPELLERS:
@@ -255,10 +297,10 @@ def main():
         print(">>> 2. The script will rip the sticks from your hand virtually!")
     else:
         print(">>> [✓] REAL FLIGHT MODE ACTIVE (GPS-DENIED SAFE VELOCITY CONTROLLER)")
-        print(">>> Drone taking off in GUIDED -> Forcing Visual Center -> LAND.")
+        print(">>> Drone taking off in GUIDED -> waiting for climb -> then ArUco centering -> LAND.")
         print(">>> Back away from the drone quickly!")
-        change_mode("GUIDED")
         arm_and_takeoff(TARGET_HEIGHT_M)
+        takeoff_start_time = time.time()
     print("=================================================================")
     
     try:
@@ -268,6 +310,30 @@ def main():
                 continue
 
             draw_crosshair(frame)
+
+            if not DESK_TESTING_NO_PROPELLERS and state == "TAKEOFF":
+                latest_alt_m = get_relative_alt_m()
+                if latest_alt_m is not None:
+                    cv2.putText(frame, f"TAKEOFF ALT: {latest_alt_m:.2f} / {TARGET_HEIGHT_M:.2f} m", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    if latest_alt_m >= TAKEOFF_MIN_CLIMB_M:
+                        takeoff_started = True
+                else:
+                    cv2.putText(frame, "TAKEOFF ALT: waiting for telemetry...", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+                if takeoff_start_time is not None and (time.time() - takeoff_start_time) > TAKEOFF_TIMEOUT_S:
+                    if not takeoff_started:
+                        raise RuntimeError("Takeoff command was sent but the vehicle never started climbing")
+                    print(">>> Takeoff timeout reached. Starting vision controller with current altitude.")
+                    state = "APPROACH"
+                elif latest_alt_m is not None and latest_alt_m >= (TARGET_HEIGHT_M - TAKEOFF_ALT_TOLERANCE_M):
+                    print(f">>> Takeoff altitude reached ({latest_alt_m:.2f} m). Starting ArUco centering.")
+                    state = "APPROACH"
+
+                cv2.putText(frame, f"MODE: {state}", (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                cv2.imshow("Precision Landing", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+                continue
 
             # Detect all markers, using Large Marker size to start
             poses = estimator.detect_markers(frame, LARGE_MARKER_SIZE)
