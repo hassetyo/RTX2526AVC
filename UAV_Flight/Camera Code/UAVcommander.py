@@ -421,8 +421,9 @@ class UAVCommander:
     
     def takeoff(self, master, target_alt=TARGET_ALT):
         # step 1: start in stabilize like your mission 4 pattern
-        self.change_mode(master, "GUIDED")
+        self.change_mode(master, "STABILIZE")
         self.arm_drone(master)
+        self.change_mode(master, "GUIDED")
 
         # step 2: climb to the requested height
         self.climb_to_target(master, target_alt)
