@@ -150,7 +150,6 @@ class ArucoDistanceEstimator:
         self.dist_coeffs = dist_coeffs
         self.aruco_dict = aruco.getPredefinedDictionary(dictionary_name)
         
-        # ─── FIXED: Enhanced 2D Detection Parameters ───────────────────────────
         if hasattr(aruco, "ArucoDetector"):
             self.detector_params = aruco.DetectorParameters()
             self._enhance_params(self.detector_params)
@@ -163,14 +162,10 @@ class ArucoDistanceEstimator:
             self.use_new_detector_api = False
 
     def _enhance_params(self, params):
-        """Applies highly robust detection parameters to prevent dead-center dropouts."""
-        # Force sub-pixel accuracy to stop perfectly centered edges from failing geometry checks
         params.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
-        # Widen the adaptive threshold window so lighting/glare changes don't wipe out the marker
         params.adaptiveThreshWinSizeMin = 3
         params.adaptiveThreshWinSizeMax = 23
         params.adaptiveThreshWinSizeStep = 10
-        # Give a little more leeway for polygon accuracy
         params.polygonalApproxAccuracyRate = 0.05
 
     def detect_markers(self, frame: np.ndarray, marker_size_m: float) -> Dict[int, MarkerPose]:
@@ -197,7 +192,6 @@ class ArucoDistanceEstimator:
     def _estimate_pose(self, corner: np.ndarray, marker_size_m: float):
         half = marker_size_m / 2.0
         
-        # FIXED: Order matches OpenCV's ArUco corner output
         object_points = np.array([
             [-half, -half, 0.0], 
             [ half, -half, 0.0],
@@ -207,7 +201,6 @@ class ArucoDistanceEstimator:
         
         image_points = corner.reshape((4, 2)).astype(np.float32)
         
-        # FIXED: ITERATIVE solver prevents 3D math ambiguities when parallel
         success, rvec, tvec = cv2.solvePnP(
             object_points, image_points,
             self.camera_matrix, self.dist_coeffs,
@@ -216,13 +209,6 @@ class ArucoDistanceEstimator:
         if not success:
             return None, None
         return rvec, tvec
-
-
-def draw_crosshair(frame: np.ndarray):
-    h, w = frame.shape[:2]
-    cx, cy = w // 2, h // 2
-    cv2.line(frame, (0, cy), (w, cy), (0, 255, 0), 1)
-    cv2.line(frame, (cx, 0), (cx, h), (0, 255, 0), 1)
 
 
 # ─── MAVLINK HELPERS ───────────────────────────────────────────────────────────
@@ -415,8 +401,6 @@ def main():
             if frame is None:
                 continue
 
-            draw_crosshair(frame)
-
             # ── TAKEOFF MONITORING ────────────────────────────────────────────
             if not DESK_TESTING_NO_PROPELLERS and state == "TAKEOFF":
                 fresh_alt = get_relative_alt_m()
@@ -490,9 +474,9 @@ def main():
                 z_b =  z_cam   # Down
                 target_eb = (x_b, y_b, z_b)
 
+                # Draw a line from center of screen to the marker (this happens AFTER detection, so it's safe)
                 cam_cx, cam_cy = frame.shape[1] // 2, frame.shape[0] // 2
-                cv2.line(frame,
-                         (cam_cx, cam_cy), pose.center_px, (0, 0, 255), 4)
+                cv2.line(frame, (cam_cx, cam_cy), pose.center_px, (0, 0, 255), 4)
 
                 stable_count += 1
                 found = True
