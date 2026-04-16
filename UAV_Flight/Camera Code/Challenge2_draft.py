@@ -944,225 +944,222 @@ def endCode(master, UAVcommander, UGVcommander, cam):
     cam.close()
     UGVcommander.close()
 
-def loiter_landing_sequence(master, UAVcommander, cam, args):
 
-    '''
-    notes: make the drone land using the code in main
+def loiter_landing_sequence(master, estimator, UAVcommander, cam, args):
+    """
+        notes: make the drone land using the code in main
     change the parameters if needed 
     if an error occurs force it go go into regular land mode
         no need to handle errors at first, 
         do it when we know the code is properly integrated
     - Sam
-    '''
-# ─── MAIN PROGRAM ──────────────────────────────────────────────────────────────
-def main():
-    # Attempt ZED first to prevent v4l2 OpenCV timeout crash
-    USE_ZED = True  
-    yaml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calibration_chessboard.yaml")
+
+    Challenge 1: Automated Precision Landing Sequence
+    This function handles the 'brain' of the landing: centering over the target
+    using computer vision and descending once alignment is perfect.
+    """
+    print(">>> Starting Challenge 1: Precision Landing Sequence")
     
-    # Intentionally initialize camera flawlessly using Friend's script wrapper
-    try:
-        # Toggle USE_ZED=True if you prefer ZED natively
-        cam = CameraInterface(use_zed=USE_ZED, camera_index=0, fps=30)
-        cam.load_standard_calibration(yaml_path)
-    except Exception as e:
-        print(f"Failed to open camera: {e}")
-        return
-
-    estimator = ArucoDistanceEstimator(cam.camera_matrix, cam.dist_coeffs, aruco.DICT_6X6_1000)
-
-    state = "APPROACH" if DESK_TESTING_NO_PROPELLERS else "TAKEOFF"
-    stable_count = 0
+    # Internal state tracking
+    state = "APPROACH"
+    stable_count = 0  # Used to ensure we aren't reacting to 'flicker' detection
     last_send = 0.0
-    takeoff_started = DESK_TESTING_NO_PROPELLERS
-    takeoff_start_time = None
-    latest_alt_m = None
-
-    print("=================================================================")
-    if DESK_TESTING_NO_PROPELLERS:
-        print(">>> [WARNING] DESK TESTING MODE ACTIVE (NO PROPS)")
-        print(">>> Hijacking raw RC limits to force motors to spin on your desk.")
-        print(">>> 1. Put drone in ALT_HOLD and forcefully push throttle up via your RC.")
-        print(">>> 2. The script will rip the sticks from your hand virtually!")
-    else:
-        print(">>> [✓] REAL FLIGHT MODE ACTIVE (GPS-DENIED SAFE VELOCITY CONTROLLER)")
-        print(">>> Drone taking off in GUIDED -> waiting for climb -> then ArUco centering -> LAND.")
-        print(">>> Back away from the drone quickly!")
-        arm_and_takeoff(TARGET_HEIGHT_M)
-        takeoff_start_time = time.time()
-    print("=================================================================")
     
+    # Proportional Gain: Higher = more aggressive centering, Lower = smoother
+    Kp = 0.8 
+
     try:
         while True:
+            # --- 1. CAPTURE & DETECTION ---
             frame = cam.get_frame()
             if frame is None:
                 continue
 
-            draw_crosshair(frame)
-
-            if not DESK_TESTING_NO_PROPELLERS and state == "TAKEOFF":
-                latest_alt_m = get_relative_alt_m()
-                if latest_alt_m is not None:
-                    cv2.putText(frame, f"TAKEOFF ALT: {latest_alt_m:.2f} / {TARGET_HEIGHT_M:.2f} m", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                    if latest_alt_m >= TAKEOFF_MIN_CLIMB_M:
-                        takeoff_started = True
-                else:
-                    cv2.putText(frame, "TAKEOFF ALT: waiting for telemetry...", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
-                if takeoff_start_time is not None and (time.time() - takeoff_start_time) > TAKEOFF_TIMEOUT_S:
-                    if not takeoff_started:
-                        raise RuntimeError("Takeoff command was sent but the vehicle never started climbing")
-                    print(">>> Takeoff timeout reached. Starting vision controller with current altitude.")
-                    state = "APPROACH"
-                elif latest_alt_m is not None and latest_alt_m >= (TARGET_HEIGHT_M - TAKEOFF_ALT_TOLERANCE_M):
-                    print(f">>> Takeoff altitude reached ({latest_alt_m:.2f} m). Starting ArUco centering.")
-                    state = "APPROACH"
-                
-                '''
-                notes: This is where my code should be put for centering and guidance of the UGV 
-                once the takeoff is complete, the drone shoud move and scan like Julian coded it to
-                once both markers are found, the drone should command the UGV to move towards the marker
-
-                    Find a way to integrate this with the existing code, use moveToCenter2.py as a reference
-                    - Sam
-                '''
-
-                cv2.putText(frame, f"MODE: {state}", (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
-                cv2.imshow("Precision Landing", frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-                continue
-
-            # Detect all markers, using Large Marker size to start
+            # We start by looking for the LARGE marker (ID 5) to get in the ballpark
             poses = estimator.detect_markers(frame, LARGE_MARKER_SIZE)
             
-            found = False
             target_eb = None
             marker_id_to_use = None
             marker_size_m_to_use = None
 
-            # Priority 1: Check if the Small Marker is visible
+            # NESTED LOGIC: If we see the small marker (ID 6), immediately prioritize it.
+            # Small markers are more accurate for the final 'touchdown' centimeters.
             if SMALL_MARKER_ID in poses:
-                # Re-estimate properly with small marker size
                 poses = estimator.detect_markers(frame, SMALL_MARKER_SIZE)
                 if SMALL_MARKER_ID in poses:
                     marker_id_to_use = SMALL_MARKER_ID
                     marker_size_m_to_use = SMALL_MARKER_SIZE
-            # Priority 2: Fallback to Large Marker
             elif LARGE_MARKER_ID in poses:
                 marker_id_to_use = LARGE_MARKER_ID
                 marker_size_m_to_use = LARGE_MARKER_SIZE
 
-            if marker_id_to_use is not None and marker_id_to_use in poses:
+            # --- 2. COORDINATE TRANSFORMATION ---
+            if marker_id_to_use is not None:
                 pose = poses[marker_id_to_use]
-                # Convert ZED/Webcam standard frame XYZ to ArduPilot FRD body frame
-                x_cam, y_cam, z_cam = float(pose.tvec[0]), float(pose.tvec[1]), float(pose.tvec[2])
-                x_b = -y_cam  # Forward
-                y_b = x_cam   # Right
-                z_b = z_cam   # Down
+                
+                # ArUco 'tvec' is in Camera Frame: X=Right, Y=Down, Z=Forward
+                # ArduPilot expects Body FRD: X=Forward, Y=Right, Z=Down
+                # This mapping aligns the camera's view with the drone's physical axes.
+                x_b = -pose.tvec[1]  # Camera 'Down' becomes Drone 'Forward'
+                y_b =  pose.tvec[0]  # Camera 'Right' stays Drone 'Right'
+                z_b =  pose.tvec[2]  # Camera 'Forward' becomes Drone 'Down' (Distance to ground)
                 target_eb = (x_b, y_b, z_b)
-
-                # 1. Visualization: Draw targeting line from camera center to marker center
-                cam_cx, cam_cy = frame.shape[1] // 2, frame.shape[0] // 2
-                marker_cx, marker_cy = pose.center_px
-                cv2.line(frame, (cam_cx, cam_cy), (marker_cx, marker_cy), (0, 0, 255), 4)
                 
                 stable_count += 1
-                found = True
-
-                corners_arr = [pose.corners.reshape(1, 4, 2).astype(np.float32)]
-                aruco.drawDetectedMarkers(frame, corners_arr, np.array([[marker_id_to_use]]))
-                cv2.drawFrameAxes(frame, cam.camera_matrix, cam.dist_coeffs, pose.rvec, pose.tvec.reshape(3, 1), marker_size_m_to_use * 0.5)
-
-                cv2.putText(frame, f"TRACKING ID: {marker_id_to_use}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(frame, f"XYZ: [{x_b:.2f}, {y_b:.2f}, {z_b:.2f}]", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-                now = time.time()
-                if now - last_send >= (1.0 / SEND_HZ):
-                    if DESK_TESTING_NO_PROPELLERS:
-                        req_roll = max(1300, min(1700, 1500 + int(y_b * 200.0)))
-                        req_pitch = max(1300, min(1700, 1500 - int(x_b * 200.0)))
-                        send_rc_override(roll=req_roll, pitch=req_pitch, throttle=1550)
-                    else:
-                        # Flight mode safe controller! Extremely similar to your friend's 
-                        # moveToCenter2.py script. Command velocity directly in GUIDED mode!
-                        if state in ["APPROACH", "PREC_LOITER", "LANDING"]:
-                            Kp = 0.8
-                            vx = float(x_b) * Kp
-                            vy = float(y_b) * Kp
-                            
-                            # Hard clamp safety speeds (0.8 m/sec is walking pace)
-                            vx = max(-0.8, min(0.8, vx))
-                            vy = max(-0.8, min(0.8, vy))
-                            vz = 0.0
-                            
-                            if state == "LANDING":
-                                # Utilize Lidar Lite V3 to dynamically adjust descent safely!
-                                lidar_m = get_lidar_distance_m()
-                                if lidar_m is not None:
-                                    # Scale speed smoothly using laser altitude! 
-                                    # Very slow (0.1m/s) if < 1m to gently kiss the platform.
-                                    # Max speed (0.4m/s) if higher up.
-                                    vz = max(0.15, min(0.4, lidar_m * 0.3))
-                                    cv2.putText(frame, f"LIDAR Z: {lidar_m:.2f}m", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                                else:
-                                    vz = 0.4 # Fallback
-                                    cv2.putText(frame, "LIDAR N/A - BLIND DESCENT", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                            
-                            send_guided_velocity(vx, vy, vz)
-                            send_landing_target(x_b, y_b, z_b) # Supplement the math for EKF logging
-                        
-                    last_send = now
-
+                estimator.draw_markers(frame, poses) # Visual debug
             else:
+                # If no marker is seen, reset the stability counter
                 stable_count = 0
-                now = time.time()
-                if now - last_send >= (1.0 / SEND_HZ):
-                    if DESK_TESTING_NO_PROPELLERS:
-                        cv2.putText(frame, "TARGET LOST - STICKS CENTERED", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        send_rc_override(1500, 1500, 1500, 1500)
-                    else:
-                        cv2.putText(frame, "TARGET LOST - BRAKING TO HOVER", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        send_guided_velocity(0.0, 0.0, 0.0) # Break and hover!
-                    last_send = now
-            # STATE MACHINE (Transitions)
-            if state == "APPROACH":
-                if stable_count >= PLND_STABLE_FRAMES:
-                    print(">>> Target stably held. Engaging GUIDED Velocity Tracking!")
-                    change_mode("GUIDED")
-                    state = "PREC_LOITER"
-            
-            elif state == "PREC_LOITER":
-                if stable_count == 0:
-                    state = "APPROACH"  
-                elif found and target_eb is not None:
+
+            # --- 3. TIMED COMMAND SENDING ---
+            # We only send MAVLink messages at a specific frequency (SEND_HZ)
+            # to avoid flooding the flight controller's serial buffer.
+            now = time.time()
+            if now - last_send >= (1.0 / SEND_HZ):
+                if target_eb:
+                    # Calculate total horizontal distance from target center
                     err_m = math.sqrt(target_eb[0]**2 + target_eb[1]**2)
-                    cv2.putText(frame, f"Align Err: {err_m:.2f}m", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                     
-                    if err_m < LAND_LATERAL_ERR_M:
-                        print(">>> Aligned flawlessly! Engaging Direct Velocity Descent!")
-                        # Notice we STAY in GUIDED mode!
-                        state = "LANDING"
-            
-            elif state == "LANDING":
-                # Wait for Touchdown
-                if not master.motors_armed():
-                    print(">>> TOUCHDOWN AUTO-DISARM CONFIRMED. LANDING COMPLETE.")
-                    state = "LANDED"
-                    break
-            
-            cv2.putText(frame, f"MODE: {state}", (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                    # Calculate velocity vectors (v = error * gain)
+                    # We cap these at 0.7 m/s for safety.
+                    vx = max(-0.7, min(0.7, float(target_eb[0]) * Kp))
+                    vy = max(-0.7, min(0.7, float(target_eb[1]) * Kp))
+                    vz = 0.0 # Default to no vertical movement while centering
+
+                    # STATE: APPROACH - Moving toward the marker area
+                    if state == "APPROACH":
+                        if stable_count >= PLND_STABLE_FRAMES:
+                            state = "PREC_LOITER"
+                            print(">>> Tracking stable. Centering...")
+
+                    # STATE: PREC_LOITER - Fine-tuning the position over the center
+                    elif state == "PREC_LOITER":
+                        # Once error is less than 20cm, we are 'centered' enough to land
+                        if err_m < LAND_LATERAL_ERR_M:
+                            state = "LANDING"
+                            print(">>> Centered! Descending...")
+
+                    # STATE: LANDING - Direct vertical descent while maintaining XY center
+                    elif state == "LANDING":
+                        # Check Lidar for true height. If it fails, use a constant 0.4m/s descent.
+                        lidar_m = get_lidar_distance_m()
+                        vz = max(0.15, min(0.4, lidar_m * 0.3)) if lidar_m else 0.4
+                    
+                    # Push the calculated velocities to the motors
+                    send_guided_velocity(vx, vy, vz)
+                    # Send telemetry update so the Ground Station (Mission Planner) sees the target
+                    send_landing_target(target_eb[0], target_eb[1], target_eb[2])
+                else:
+                    # SAFETY: If we lose the marker, stop moving immediately to prevent drifting
+                    send_guided_velocity(0.0, 0.0, 0.0)
+                
+                last_send = now
+
+            # --- 4. COMPLETION & TERMINATION ---
+            # Check if ArduPilot has disarmed (detected touchdown via pressure sensor/IMU)
+            if state == "LANDING" and not master.motors_armed():
+                print(">>> Touchdown! Sequence Complete.")
+                break
+
+            # Feedback Window
+            cv2.putText(frame, f"STATE: {state}", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             cv2.imshow("Precision Landing", frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
-    finally:
-        print("Cleaning up system...")
-        if DESK_TESTING_NO_PROPELLERS:
-            release_rc_override()
+    except Exception as e:
+        # GLOBAL FAILSAFE: If anything breaks in the code, force a standard RTL or LAND
+        print(f"CRITICAL CODE ERROR: {e}")
+        change_mode("LAND")
+
+# ─── MAIN PROGRAM ──────────────────────────────────────────────────────────────
+def main():
+    # 1. Initialize variables and configurations
+    print("\n[STEP 1] Initializing system variables and arguments...")
+    args = parse_args()
+    
+    # Placeholder for the UAV Commander (Assumes it's in a separate file or defined class)
+    # Based on your base logic: 
+    import UAVboss 
+    uav_boss = UAVboss.UAVCommander()
+    
+    master = None
+    cam = None
+    estimator = None
+    ugv_commander = None
+
+    try:
+        # 2. Connect to the Drone
+        print(f"[STEP 2] Connecting to UAV at {MAVLINK_CONN}...")
+        master = uav_boss.connect(MAVLINK_CONN, BAUD_RATE)
+
+        if master is not None:
+            print(">>> UAV Connection Successful.")
+            
+            # 3. Takeoff
+            print(f"[STEP 3] Initiating Takeoff to {TARGET_HEIGHT_M}m...")
+            uav_boss.takeoff(master, target_alt=TARGET_HEIGHT_M)
+            
+            # 4. Initialize Vision and UGV Bridge
+            print("[STEP 4] Initializing Camera and UGV Bridge...")
+            cam, estimator, ugv_commander = initialize_system(args)
+            
+            # 5. Move to Center (Grid Search/Climb logic)
+            print("[STEP 5] Running 'moveToCenter' sequence...")
+            did_it_move = moveToCenter(master, uav_boss, estimator, cam, args)
+            
+            if did_it_move == 1:
+                print(">>> Successfully moved to center and detected markers.")
+                
+                # 6. Guide UGV (Command Ground Vehicle)
+                print("[STEP 6] Starting UGV Navigation logic...")
+                # Note: This function runs until the UGV reaches its destination or 'q' is pressed
+                guideUGV(args, ugv_commander, estimator, cam)
+                print(">>> UGV Navigation phase completed.")
+
+                # 7. Precision Landing (The final drop)
+                print("[STEP 7] Initiating UAV Precision Landing Sequence...")
+                loiter_landing_sequence(master, estimator, uav_boss, cam, args)
+                print(">>> Precision Landing Sequence completed.")
+
+            elif did_it_move == 0:
+                print("[ERROR] Logic Error in moveToCenter: Markers never found.")
+                endCode(master, uav_boss, ugv_commander, cam)
+                return
+                
+            elif did_it_move == -1:
+                print("[EXIT] User requested exit during moveToCenter.")
+                endCode(master, uav_boss, ugv_commander, cam)
+                return
         else:
-            send_guided_velocity(0.0, 0.0, 0.0) # Hover brake!
-        cam.close()
+            # Handle connection failure
+            if DESK_TESTING_NO_PROPELLERS:
+                print("[TESTING] Running in DESK MODE: Skipping drone connection/Takeoff.")
+                # You might want to initialize system anyway for vision testing
+                cam, estimator, ugv_commander = initialize_system(args)
+                guideUGV(args, ugv_commander, estimator, cam)
+            else:
+                print("[CRITICAL] Failed to connect to drone. Check your serial port/telemetry.")
+                return
+
+        print("\nMission complete. Cleaning up resources...")
+        endCode(master, uav_boss, ugv_commander, cam)
+
+    except KeyboardInterrupt:
+        print("\n[HALT] Keyboard interrupt received. Emergency landing initiated.")
+        if master and uav_boss:
+            endCode(master, uav_boss, ugv_commander, cam)
+        
+    except Exception as e:
+        print(f"\n[CRITICAL ERROR] An unexpected error occurred: {e}")
+        # Final safety failsafe
+        if master:
+            print("Attempting emergency land due to script crash...")
+            change_mode("LAND")
+        if cam:
+            cam.close()
+        if ugv_commander:
+            ugv_commander.close()
 
 if __name__ == "__main__":
     main()
