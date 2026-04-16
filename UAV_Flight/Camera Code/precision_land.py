@@ -149,14 +149,29 @@ class ArucoDistanceEstimator:
         self.camera_matrix = camera_matrix
         self.dist_coeffs = dist_coeffs
         self.aruco_dict = aruco.getPredefinedDictionary(dictionary_name)
+        
+        # ─── FIXED: Enhanced 2D Detection Parameters ───────────────────────────
         if hasattr(aruco, "ArucoDetector"):
             self.detector_params = aruco.DetectorParameters()
+            self._enhance_params(self.detector_params)
             self.detector = aruco.ArucoDetector(self.aruco_dict, self.detector_params)
             self.use_new_detector_api = True
         else:
             self.detector_params = aruco.DetectorParameters_create()
+            self._enhance_params(self.detector_params)
             self.detector = None
             self.use_new_detector_api = False
+
+    def _enhance_params(self, params):
+        """Applies highly robust detection parameters to prevent dead-center dropouts."""
+        # Force sub-pixel accuracy to stop perfectly centered edges from failing geometry checks
+        params.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
+        # Widen the adaptive threshold window so lighting/glare changes don't wipe out the marker
+        params.adaptiveThreshWinSizeMin = 3
+        params.adaptiveThreshWinSizeMax = 23
+        params.adaptiveThreshWinSizeStep = 10
+        # Give a little more leeway for polygon accuracy
+        params.polygonalApproxAccuracyRate = 0.05
 
     def detect_markers(self, frame: np.ndarray, marker_size_m: float) -> Dict[int, MarkerPose]:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -182,8 +197,7 @@ class ArucoDistanceEstimator:
     def _estimate_pose(self, corner: np.ndarray, marker_size_m: float):
         half = marker_size_m / 2.0
         
-        # FIXED: Order now matches OpenCV's ArUco corner output
-        # (Top-Left, Top-Right, Bottom-Right, Bottom-Left)
+        # FIXED: Order matches OpenCV's ArUco corner output
         object_points = np.array([
             [-half, -half, 0.0], 
             [ half, -half, 0.0],
@@ -193,7 +207,7 @@ class ArucoDistanceEstimator:
         
         image_points = corner.reshape((4, 2)).astype(np.float32)
         
-        # FIXED: Swapped to ITERATIVE solver to prevent dead-center dropouts
+        # FIXED: ITERATIVE solver prevents 3D math ambiguities when parallel
         success, rvec, tvec = cv2.solvePnP(
             object_points, image_points,
             self.camera_matrix, self.dist_coeffs,
@@ -338,9 +352,6 @@ def arm_and_takeoff(alt: float):
         0, 0, 0, 0, 0, 0, alt
     )
 
-    # ── IMPROVEMENT 1: Wait for COMMAND_ACK before entering climb loop ──────
-    # Without this, a silently rejected command causes the script to wait out
-    # the full TAKEOFF_TIMEOUT_S with no hint that anything went wrong.
     print("Waiting for takeoff command ACK...")
     ack = master.recv_match(type='COMMAND_ACK', blocking=True, timeout=5.0)
     if ack is None:
@@ -376,13 +387,8 @@ def main():
     takeoff_started   = DESK_TESTING_NO_PROPELLERS  # desk mode is already "in the air"
     takeoff_start_time = None
 
-    # ── IMPROVEMENT 2: Persistent altitude cache ─────────────────────────────
-    # get_relative_alt_m() is non-blocking and returns None when no fresh
-    # message is buffered. Without caching, latest_alt_m snaps back to None
-    # every missed poll, causing OSD flicker and potentially preventing
-    # takeoff_started from ever being set.
-    last_known_alt_m  = None   # holds the most recent valid reading
-    latest_alt_m      = None   # display value — always equals last_known_alt_m after first fix
+    last_known_alt_m  = None   
+    latest_alt_m      = None   
 
     print("=================================================================")
     if DESK_TESTING_NO_PROPELLERS:
@@ -413,19 +419,16 @@ def main():
 
             # ── TAKEOFF MONITORING ────────────────────────────────────────────
             if not DESK_TESTING_NO_PROPELLERS and state == "TAKEOFF":
-
-                # IMPROVEMENT 2 (applied): only overwrite cache when we have real data
                 fresh_alt = get_relative_alt_m()
                 if fresh_alt is not None:
                     last_known_alt_m = fresh_alt
-                latest_alt_m = last_known_alt_m  # never None after first valid reading
+                latest_alt_m = last_known_alt_m  
 
                 if latest_alt_m is not None:
                     cv2.putText(frame,
                         f"TAKEOFF ALT: {latest_alt_m:.2f} / {TARGET_HEIGHT_M:.2f} m",
                         (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-                    # Vehicle has left the ground — safe to proceed past timeout
                     if latest_alt_m >= TAKEOFF_MIN_CLIMB_M:
                         takeoff_started = True
                 else:
@@ -435,20 +438,13 @@ def main():
 
                 elapsed = time.time() - takeoff_start_time if takeoff_start_time else 0.0
 
-                # ── IMPROVEMENT 3: Timeout only aborts if vehicle never climbed ──
-                # Previously, a telemetry gap could prevent takeoff_started from
-                # being set, causing a valid flight to abort. Now we only raise
-                # if we are certain the vehicle never left the ground.
                 if elapsed > TAKEOFF_TIMEOUT_S:
                     if not takeoff_started:
-                        # ACK was accepted but the vehicle never physically climbed
                         raise RuntimeError(
                             "Takeoff command was accepted but the vehicle never "
                             f"reached {TAKEOFF_MIN_CLIMB_M:.2f} m in "
                             f"{TAKEOFF_TIMEOUT_S:.0f} s — check motors and ESCs")
                     else:
-                        # Vehicle is airborne but hasn't hit the target band yet;
-                        # start vision loop at whatever altitude we're at
                         print(">>> Takeoff timeout reached. Starting vision "
                               "controller at current altitude.")
                         state = "APPROACH"
