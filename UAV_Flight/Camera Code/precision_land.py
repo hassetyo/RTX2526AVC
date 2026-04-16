@@ -164,7 +164,7 @@ class ArucoDistanceEstimator:
             corners, ids, _ = self.detector.detectMarkers(gray)
         else:
             corners, ids, _ = aruco.detectMarkers(gray, self.aruco_dict,
-                                                   parameters=self.detector_params)
+                                                  parameters=self.detector_params)
         poses: Dict[int, MarkerPose] = {}
         if ids is None or len(ids) == 0:
             return poses
@@ -179,10 +179,10 @@ class ArucoDistanceEstimator:
             )
         return poses
 
-def _estimate_pose(self, corner: np.ndarray, marker_size_m: float):
+    def _estimate_pose(self, corner: np.ndarray, marker_size_m: float):
         half = marker_size_m / 2.0
         
-        # 1. FIXED: Order now matches OpenCV's ArUco corner output
+        # FIXED: Order now matches OpenCV's ArUco corner output
         # (Top-Left, Top-Right, Bottom-Right, Bottom-Left)
         object_points = np.array([
             [-half, -half, 0.0], 
@@ -193,7 +193,7 @@ def _estimate_pose(self, corner: np.ndarray, marker_size_m: float):
         
         image_points = corner.reshape((4, 2)).astype(np.float32)
         
-        # 2. FIXED: Swapped to ITERATIVE solver to prevent dead-center dropouts
+        # FIXED: Swapped to ITERATIVE solver to prevent dead-center dropouts
         success, rvec, tvec = cv2.solvePnP(
             object_points, image_points,
             self.camera_matrix, self.dist_coeffs,
@@ -202,6 +202,7 @@ def _estimate_pose(self, corner: np.ndarray, marker_size_m: float):
         if not success:
             return None, None
         return rvec, tvec
+
 
 def draw_crosshair(frame: np.ndarray):
     h, w = frame.shape[:2]
