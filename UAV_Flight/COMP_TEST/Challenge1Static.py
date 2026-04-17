@@ -64,7 +64,7 @@ RIGHT_SIGN = 1.0
 
 # Autonomous mission behavior
 CRUISE_ALT_M = 2.0
-TAKEOFF_TIMEOUT_S = 20.0
+TAKEOFF_TIMEOUT_S = 60.0
 FOLLOW_BEFORE_LAND_S = 10.0
 
 # Positioning / descent logic
