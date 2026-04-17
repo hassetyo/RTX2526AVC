@@ -24,13 +24,13 @@ ESP32_BRIDGE_PORT = "/dev/ttyUSB0"
 # ----------------------------
 # Motion tuning
 # ----------------------------
-SPEED_MPH = 0.8
+SPEED_MPH = 5.0
 MPH_TO_MPS = 0.44704
 SPEED_MPS = SPEED_MPH * MPH_TO_MPS
 
 # Small turn step per UAV correction command
 TURN_STEP_DEG = 12.0
-TURN_RATE_DEG_S = 10.0
+TURN_RATE_DEG_S = 90.0
 TURN_TOLERANCE_DEG = 5.0
 
 # Forward move defaults
