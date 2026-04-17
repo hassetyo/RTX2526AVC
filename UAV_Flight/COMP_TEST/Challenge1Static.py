@@ -109,7 +109,15 @@ def clamp(value, low, high):
 def handle_sigint(sig, frame):
     global running
     running = False
-    print("\n[INFO] Stopping script...")
+    log_event("\n[INFO] Stopping script...")
+
+LOG_FILE = "Challenge1_Static_official_log.txt"
+
+def log_event(text): # helper to write required logs
+    timestamp = time.strftime("%H:%M:%S")
+    line = f"[{timestamp}] {text}\n"
+    print(line.strip())
+    with open(LOG_FILE, "a") as f: f.write(line)
 
 
 signal.signal(signal.SIGINT, handle_sigint)
@@ -120,11 +128,11 @@ signal.signal(signal.SIGINT, handle_sigint)
 # ------------------------------------------------------------
 
 def connect_mavlink():
-    print(f"[INFO] Connecting to MAVLink: {MAVLINK_CONNECTION}")
+    log_event(f"[INFO] Connecting to MAVLink: {MAVLINK_CONNECTION}")
     master = mavutil.mavlink_connection(MAVLINK_CONNECTION, baud=MAVLINK_BAUD)
     master.wait_heartbeat()
-    print("[INFO] MAVLink heartbeat received")
-    print(f"[INFO] System ID: {master.target_system}, Component ID: {master.target_component}")
+    log_event("[INFO] MAVLink heartbeat received")
+    log_event(f"[INFO] System ID: {master.target_system}, Component ID: {master.target_component}")
     return master
 
 
@@ -141,18 +149,18 @@ def set_mode(master, mode_name):
         raise RuntimeError(f"Flight mode '{mode_name}' not available")
     mode_id = mapping[mode_name]
     master.set_mode(mode_id)
-    print(f"[INFO] Requested mode: {mode_name}")
+    log_event(f"[INFO] Requested mode: {mode_name}")
 
 
 def arm_vehicle(master):
-    print("[INFO] Arming vehicle...")
+    log_event("[INFO] Arming vehicle...")
     master.arducopter_arm()
     master.motors_armed_wait()
-    print("[INFO] Vehicle armed")
+    log_event("[INFO] Vehicle armed")
 
 
 def disarm_vehicle(master):
-    print("[INFO] Disarming vehicle...")
+    log_event("[INFO] Disarming vehicle...")
     master.arducopter_disarm()
     time.sleep(1.0)
 
@@ -162,7 +170,7 @@ def disable_ugv_avoidance(master):
     If left on, the drone sees the UGV as a collidable wall and gracefully
     slides sideways to land in the dirt. We must kill this parameter!
     """
-    print("[INFO] Force-disabling AVOID_ENABLE so the Drone doesn't dodge the UGV")
+    log_event("[INFO] Force-disabling AVOID_ENABLE so the Drone doesn't dodge the UGV")
     try:
         master.mav.param_set_send(
             master.target_system, master.target_component,
@@ -177,7 +185,7 @@ def takeoff(master, altitude_m):
     """
     I use MAV_CMD_NAV_TAKEOFF in GUIDED mode.
     """
-    print(f"[INFO] Taking off to {altitude_m:.2f} m")
+    log_event(f"[INFO] Taking off to {altitude_m:.2f} m")
     master.mav.command_long_send(
         master.target_system,
         master.target_component,
@@ -245,9 +253,9 @@ def wait_until_altitude(master, target_alt_m, timeout_s):
     while time.time() - start < timeout_s and running:
         alt = get_relative_altitude_m(master)
         if alt is not None:
-            print(f"[INFO] Current altitude: {alt:.2f} m")
+            log_event(f"[INFO] Current altitude: {alt:.2f} m")
             if alt >= target_alt_m * 0.85:
-                print("[INFO] Takeoff altitude reached")
+                log_event("[INFO] Takeoff altitude reached")
                 return True
         time.sleep(0.2)
     return False
@@ -288,7 +296,7 @@ def open_zed():
     # OpenCV expects a distortion vector.
     dist_coeffs = np.array(left_calib.disto[:5], dtype=np.float32)
 
-    print("[INFO] ZED X opened")
+    log_event("[INFO] ZED X opened")
     print("[INFO] Camera matrix:")
     print(camera_matrix)
 
@@ -403,8 +411,8 @@ def main():
     zed, runtime_params, image_mat, camera_matrix, dist_coeffs = open_zed()
     detect_markers = create_aruco_detector()
 
-    print("\n[INFO] Starting autonomous Challenge 1 logic")
-    print("[INFO] I am switching to GUIDED, arming, and taking off")
+    log_event("\n[INFO] Starting autonomous Challenge 1 logic")
+    log_event("[INFO] I am switching to GUIDED, arming, and taking off")
 
     set_mode(master, "GUIDED")
     time.sleep(1.0)
@@ -415,9 +423,9 @@ def main():
     takeoff(master, CRUISE_ALT_M)
     reached = wait_until_altitude(master, CRUISE_ALT_M, TAKEOFF_TIMEOUT_S)
     if not reached:
-        print("[WARN] I did not confirm target altitude in time, but I will continue carefully")
+        log_event("[WARN] I did not confirm target altitude in time, but I will continue carefully")
 
-    print("[INFO] Now I start visual tracking and autonomous approach")
+    log_event("[INFO] Now I start visual tracking and autonomous approach")
 
     last_marker_seen_time = 0.0
     stable_frames = 0
@@ -464,7 +472,7 @@ def main():
                         vz = DESCENT_SPEED_MPS
                     else:
                         if xy_error_m < FINAL_CENTER_TOLERANCE_M:
-                            print("[INFO] Low and centered -> switching to LAND")
+                            log_event("[INFO] Low and centered -> switching to LAND")
                             send_body_velocity(master, 0.0, 0.0, 0.0)
                             set_mode(master, "LAND")
                             final_land_sent = True
@@ -507,7 +515,7 @@ def main():
 
         time.sleep(0.05)
 
-    print("[INFO] Exiting. I send zero velocity before shutdown.")
+    log_event("[INFO] Exiting. I send zero velocity before shutdown.")
     try:
         send_body_velocity(master, 0.0, 0.0, 0.0)
     except Exception:
@@ -517,7 +525,7 @@ def main():
         cv2.destroyAllWindows()
 
     zed.close()
-    print("[INFO] Done")
+    log_event("[INFO] Done")
 
 
 if __name__ == "__main__":
