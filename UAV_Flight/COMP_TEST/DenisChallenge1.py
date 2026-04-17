@@ -424,7 +424,7 @@ def main():
     log_event("\n[INFO] Starting autonomous Challenge 1 logic")
     log_event("[INFO] I am switching to GUIDED, arming, and taking off")
 
-    set_mode(master, "GUIDED")
+    set_mode(master, "ALT_HOLD")
     time.sleep(1.0)
 
     arm_vehicle(master)
@@ -538,6 +538,7 @@ def main():
     except KeyboardInterrupt:
         log_event("[INFO] Keyboard interrupt received, stopping...")
         running = False
+        
 
     log_event("[INFO] Exiting. I send zero velocity before shutdown.")
     try:
