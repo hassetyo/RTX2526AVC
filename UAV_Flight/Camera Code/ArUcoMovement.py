@@ -11,6 +11,8 @@ import numpy as np
 
 import v2v_bridge
 
+showDisplay = False
+
 
 @dataclass
 class MarkerPose:
@@ -829,15 +831,15 @@ def main():
                     2,
                     cv2.LINE_AA,
                 )
+            if(showDisplay):
+                cv2.imshow("ArUco Distance + UGV Navigation", display)
 
-            cv2.imshow("ArUco Distance + UGV Navigation", display)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                break
-            elif key == ord("s"):
-                cv2.imwrite("aruco_distance_ugv_nav_screenshot.png", display)
-                print("Saved: aruco_distance_ugv_nav_screenshot.png")
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
+                elif key == ord("s"):
+                    cv2.imwrite("aruco_distance_ugv_nav_screenshot.png", display)
+                    print("Saved: aruco_distance_ugv_nav_screenshot.png")
 
     finally:
         commander.close()
