@@ -190,6 +190,7 @@ class ArucoDistanceEstimator:
         if not success: return None, None
         return rvec, tvec
 
+
 class UAVCommander:
     def __init__(self):
         self.log_file = "Challenge2_log.txt"
@@ -428,7 +429,8 @@ class UAVCommander:
 
         start_t = time.time()
         while (time.time() - start_t) < hover_time_s:
-            alt = self.print_altitude(master, prefix="Hover Alt")
+            print(f"Hovering... Time remaining: {hover_time_s - (time.time() - start_t):.1f} s", end="\r", flush=True)
+            alt, source = self.get_altitude_m(master, prefix="Hover Alt")
 
             # in alt hold, keeping throttle near mid-stick tells the autopilot to maintain altitude
             self.set_throttle(master, THROTTLE_HOVER)
@@ -436,9 +438,11 @@ class UAVCommander:
             # tiny trim if it drifts a lot while still keeping the command near mid-stick
             if alt is not None:
                 if alt < TARGET_HEIGHT_M - 0.20:
-                    self.set_throttle(master, THROTTLE_HOVER + 40)
+                    print(f"Altitude low: {alt:.2f} m, rising")
+                    self.send_guided_velocity(master, vx=0, vy=0, vz=-0.1)  # small upward velocity command
                 elif alt > TARGET_HEIGHT_M + 0.20:
-                    self.set_throttle(master, THROTTLE_HOVER - 40)
+                    print(f"Altitude high: {alt:.2f} m, descending")
+                    self.send_guided_velocity(master, vx=0, vy=0, vz=0.1)   # small downward velocity command
 
             time.sleep(HOVER_LOOP_DT)
 
