@@ -18,8 +18,8 @@ CONNECTION_STRING = "/dev/ttyACM0"     # or "udp:127.0.0.1:14551" for SITL
 BAUD_RATE         = 57600
 
 # ─── FLIGHT PARAMS ───────────────────────────────────────────────────────────────
-TARGET_ALT_M       = 2.3              # metres to climb to
-HOVER_TIMEOUT_S    = 10.0             # seconds to hover before auto-landing
+TARGET_ALT_M       = 0.15              # metres to climb to
+HOVER_TIMEOUT_S    = 1000.0             # seconds to hover before auto-landing
 ALT_TOLERANCE_M    = 0.25             # how close to target counts as "reached"
 CLIMB_LOOP_DT      = 0.10             # loop period during climb
 HOVER_LOOP_DT      = 0.10             # loop period during hover
