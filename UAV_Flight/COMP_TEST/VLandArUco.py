@@ -13,6 +13,15 @@ Flight sequence:
   5. Touchdown confirmed by auto-disarm heartbeat -> script exits.
 
 Emergency:  KeyboardInterrupt or RC channel 7 high -> immediate LAND.
+
+
+PARAMS:
+Since you're using optical flow + LiDAR (no GPS), 
+make sure EK3_SRC1_POSXY=0 (optical flow), 
+EK3_SRC1_VELXY=5 (optical flow), 
+and EK3_SRC1_POSZ=2 (rangefinder) 
+are set in your ArduPilot params so 
+GUIDED mode's EKF has valid position/velocity sources.
 """
 
 from pymavlink import mavutil
@@ -37,10 +46,10 @@ CLIMB_LOOP_DT      = 0.10
 HOVER_LOOP_DT      = 0.10
 LAND_TIMEOUT_S     = 60.0
 
-# ─── THROTTLE TUNING (ALT_HOLD proportional controller) ─────────────────────────
-THROTTLE_MIN   = 1000
-THROTTLE_HOVER = 1500
-THROTTLE_CLIMB = 1650
+# ─── TAKEOFF TUNING (GUIDED mode) ────────────────────────────────────────────────
+TAKEOFF_TIMEOUT_S  = 20.0             # abort if vehicle never climbs
+TAKEOFF_MIN_CLIMB_M = 0.15            # consider airborne once this height is passed
+ARM_TIMEOUT_S      = 10.0
 
 # ─── RC EMERGENCY LAND SWITCH ───────────────────────────────────────────────────
 EMERGENCY_LAND_CH            = 7
@@ -283,10 +292,15 @@ def arm(master):
         master.target_system, master.target_component,
         mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
         1, 0, 0, 0, 0, 0, 0)
-    log_event("Arm command sent.")
-    ack = master.recv_match(type='COMMAND_ACK', blocking=True, timeout=5)
-    if ack:
-        log_event(f"Arm ACK result: {ack.result}")
+    log_event("Arm command sent – waiting for motors ...")
+    deadline = time.time() + ARM_TIMEOUT_S
+    while time.time() < deadline:
+        hb = master.recv_match(type='HEARTBEAT', blocking=True, timeout=1)
+        if hb and (hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+            log_event("Motors armed!")
+            return True
+    log_event("[WARN] Arm timed out – motors not armed.")
+    return False
 
 
 def disarm(master):
@@ -297,16 +311,28 @@ def disarm(master):
     log_event("Disarm command sent.")
 
 
-def set_throttle(master, pwm):
-    master.mav.rc_channels_override_send(
-        master.target_system, master.target_component,
-        0, 0, int(pwm), 0, 0, 0, 0, 0)
-
-
 def clear_rc_override(master):
     master.mav.rc_channels_override_send(
         master.target_system, master.target_component,
         0, 0, 0, 0, 0, 0, 0, 0)
+
+
+def send_takeoff(master, alt):
+    """Send MAV_CMD_NAV_TAKEOFF and verify ACK."""
+    master.mav.command_long_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
+        0, 0, 0, 0, 0, 0, alt)
+    log_event("Takeoff command sent – waiting for ACK ...")
+    ack = master.recv_match(type='COMMAND_ACK', blocking=True, timeout=5)
+    if ack is None:
+        log_event("[WARN] No ACK for takeoff command.")
+        return False
+    if ack.result != mavutil.mavlink.MAV_RESULT_ACCEPTED:
+        log_event(f"[WARN] Takeoff rejected (result={ack.result}).")
+        return False
+    log_event("Takeoff command accepted.")
+    return True
 
 
 def send_guided_velocity(master, vx, vy, vz):
@@ -318,6 +344,7 @@ def send_guided_velocity(master, vx, vy, vz):
         0, 0, 0,
         float(vx), float(vy), float(vz),
         0, 0, 0, 0, 0)
+    print(f"  Sent velocity cmd: vx={vx:.2f} m/s, vy={vy:.2f} m/s, vz={vz:.2f} m/s", end="\r", flush=True)
 
 
 def send_landing_target(master, x_b, y_b, z_b):
@@ -433,12 +460,24 @@ def main():
         cam.camera_matrix, cam.dist_coeffs, aruco.DICT_6X6_1000)
 
     try:
-        # ── ARM & TAKEOFF (ALT_HOLD) ─────────────────────────────────────
-        change_mode(master, "ALT_HOLD", "ALTHOLD")
-        arm(master)
+        # ── ARM & TAKEOFF (GUIDED) ────────────────────────────────────────
+        change_mode(master, "GUIDED")
+        if not arm(master):
+            log_event("Failed to arm – aborting.")
+            cam.close()
+            return
 
+        if not send_takeoff(master, TARGET_ALT_M):
+            log_event("Takeoff failed – aborting.")
+            land_safely(master)
+            cam.close()
+            return
+
+        # ── WAIT FOR TARGET ALTITUDE ──────────────────────────────────────
         log_event(f"Climbing to {TARGET_ALT_M:.2f} m ...")
-        stable_start = None
+        takeoff_start = time.time()
+        takeoff_started = False
+        last_known_alt = None
 
         while True:
             if check_rc_emergency_switch(master):
@@ -448,24 +487,28 @@ def main():
                 return
 
             alt = print_sensors(master)
-
             if alt is not None:
-                err = TARGET_ALT_M - alt
-                thr = int(THROTTLE_HOVER + 150 * err)
-                thr = max(THROTTLE_MIN, min(1800, thr))
-            else:
-                thr = THROTTLE_CLIMB
-            set_throttle(master, thr)
+                last_known_alt = alt
 
-            if alt is not None and alt >= (TARGET_ALT_M - ALT_TOLERANCE_M):
-                if stable_start is None:
-                    stable_start = time.time()
-                elif (time.time() - stable_start) >= 1.0:
-                    print()
-                    log_event(f"Target altitude reached: {alt:.2f} m")
+            current_alt = last_known_alt
+            if current_alt is not None and current_alt >= TAKEOFF_MIN_CLIMB_M:
+                takeoff_started = True
+
+            elapsed = time.time() - takeoff_start
+            if elapsed > TAKEOFF_TIMEOUT_S:
+                if not takeoff_started:
+                    log_event("Takeoff timeout – vehicle never left the ground. Aborting.")
+                    land_safely(master)
+                    cam.close()
+                    return
+                else:
+                    log_event("Takeoff timeout – proceeding at current altitude.")
                     break
-            else:
-                stable_start = None
+
+            if current_alt is not None and current_alt >= (TARGET_ALT_M - ALT_TOLERANCE_M):
+                print()
+                log_event(f"Target altitude reached: {current_alt:.2f} m")
+                break
 
             time.sleep(CLIMB_LOOP_DT)
 
@@ -481,23 +524,12 @@ def main():
                 return
 
             alt = print_sensors(master)
-
-            if alt is not None:
-                err = TARGET_ALT_M - alt
-                thr = int(THROTTLE_HOVER + 80 * err)
-                thr = max(1400, min(1600, thr))
-            else:
-                thr = THROTTLE_HOVER
-            set_throttle(master, thr)
-
+            # Zero velocity = hold position in GUIDED
+            send_guided_velocity(master, 0.0, 0.0, 0.0)
             time.sleep(HOVER_LOOP_DT)
 
         print()
-        log_event("Hover wait complete – switching to GUIDED for ArUco tracking.")
-
-        # ── SWITCH TO GUIDED ──────────────────────────────────────────────
-        clear_rc_override(master)
-        change_mode(master, "GUIDED")
+        log_event("Hover wait complete – starting ArUco tracking.")
 
         # ── ARUCO TRACKING & PRECISION LAND ───────────────────────────────
         state = "SEARCHING"    # SEARCHING -> PREC_LOITER -> LANDING -> LANDED
