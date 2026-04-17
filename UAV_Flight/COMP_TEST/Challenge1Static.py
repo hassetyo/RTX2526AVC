@@ -2,33 +2,35 @@
 """
 Challenge 1 - Autonomous UAV landing on moving UGV
 Using:
-- ZED 2i camera
+- ZED X camera via ZED SDK Python API
 - ArUco marker ID 5 on the UGV
+- Smaller ArUco marker ID 6 nested for close-range precision
 - ArduPilot GUIDED mode
 - MAVLink body-frame velocity commands
 
-What I am doing:
-1. I connect to the drone through MAVLink.
-2. I open the ZED 2i and read camera intrinsics from the SDK.
-3. I detect ArUco marker ID 5.
-4. I estimate the marker pose relative to the camera.
-5. I convert that pose into body-frame forward/right/down errors.
-6. I switch the drone to GUIDED and command body-frame velocity.
-7. I keep descending only when the marker is centered enough.
-8. I switch to LAND when the drone is low and centered.
+Mission behavior:
+1. Connect to the drone through MAVLink.
+2. Open the ZED camera and read camera intrinsics from the SDK.
+3. Detect ArUco markers, giving priority to small marker ID 6 before ID 5.
+4. Estimate the marker pose relative to the camera.
+5. Convert that pose into body-frame forward/right/down errors.
+6. Switch the drone to GUIDED, arm, and take off.
+7. After takeoff, follow the target for 10 seconds before beginning precision landing.
+   - The 10-second timer starts only when marker ID 5 is first acquired.
+   - During this follow phase, ID 6 still has priority over ID 5 for tracking if visible.
+8. After the follow phase completes, begin precision descent only when centered enough.
+9. Switch to LAND when low and tightly centered.
 
 Important:
-- I do NOT use RC override.
-- I do NOT depend on manual stick corrections.
-- I do NOT descend if the marker is not visible.
-- If the marker is lost, I command zero velocity so the drone holds.
+- No RC override.
+- No manual stick corrections required.
+- No descent if the marker is not visible.
+- If the marker is lost, command zero velocity so the drone holds.
 """
 
 import time
 import math
 import signal
-import sys
-
 import cv2
 import numpy as np
 from pymavlink import mavutil
@@ -38,57 +40,52 @@ import pyzed.sl as sl
 
 
 # ============================================================
-# USER SETTINGS - SECURE FOR 2030 HARDWARE
+# USER SETTINGS
 # ============================================================
 
-# MAVLink connection:
-MAVLINK_CONNECTION = "/dev/ttyACM0"   # Explicitly using your USB connection!
+# MAVLink connection
+MAVLINK_CONNECTION = "/dev/ttyACM0"
 MAVLINK_BAUD = 921600
 
 # Marker settings
 MARKER_ID = 5
-MARKER_SIZE_M = 0.3048  # (12 inches)
+MARKER_SIZE_M = 0.3048          # 12 inches
 SMALL_MARKER_ID = 6
-SMALL_MARKER_SIZE_M = 0.1016 # (4 inches) - Critically prevents FOV clipping at low altitudes!
+SMALL_MARKER_SIZE_M = 0.1016    # 4 inches
 
 # Camera mounting assumption
-# True  = top of the camera image points toward the front of the drone
-# False = top of the camera image points toward the rear of the drone
+# True  = top of camera image points toward front of drone
+# False = top of camera image points toward rear of drone
 CAMERA_TOP_OF_IMAGE_IS_DRONE_FRONT = True
 
-# If my test shows forward/back is reversed, I flip FORWARD_SIGN to -1.0
+# Flip these if test results show axis directions are reversed
 FORWARD_SIGN = 1.0
-
-# If my test shows left/right is reversed, I flip RIGHT_SIGN to -1.0
 RIGHT_SIGN = 1.0
 
 # Autonomous mission behavior
-CRUISE_ALT_M = 2.0              # target takeoff/search altitude
+CRUISE_ALT_M = 2.0
 TAKEOFF_TIMEOUT_S = 20.0
+FOLLOW_BEFORE_LAND_S = 10.0
 
 # Positioning / descent logic
-# ULTRA TIGHT: Because the marker isn't moving, we demand pinpoint accuracy!
-CENTER_TOLERANCE_M = 0.08       # Strict XY error tolerance to begin descent
-FINAL_CENTER_TOLERANCE_M = 0.03 # Perfect alignment before triggering TOUCHDOWN sequence
-START_DESCENT_IF_DOWN_M = 1.6   
+CENTER_TOLERANCE_M = 0.08
+FINAL_CENTER_TOLERANCE_M = 0.03
 FINAL_SWITCH_TO_LAND_DOWN_M = 0.35
 
 # Velocities
-# CAUTIOUS: Slower speeds to prevent pendulum swinging over a static platform
 MAX_XY_SPEED_MPS = 0.40
-DESCENT_SPEED_MPS = 0.12  
+DESCENT_SPEED_MPS = 0.12
 
 # Proportional control gains
-# SMOOTH: Lower proportional values guarantees it doesn't violently jitter over the mark
 KP_FORWARD = 0.65
 KP_RIGHT = 0.65
 
-# Marker-loss handling
+# Marker-loss / detection stability
 MARKER_LOST_HOLD_S = 0.50
 MIN_STABLE_FRAMES = 8
 
 # ZED camera settings
-ZED_RESOLUTION = sl.RESOLUTION.HD1080  # ZED X required global shutter map
+ZED_RESOLUTION = sl.RESOLUTION.HD1080
 ZED_FPS = 30
 
 # Display
@@ -109,15 +106,7 @@ def clamp(value, low, high):
 def handle_sigint(sig, frame):
     global running
     running = False
-    log_event("\n[INFO] Stopping script...")
-
-LOG_FILE = "Challenge1_Static_official_log.txt"
-
-def log_event(text): # helper to write required logs
-    timestamp = time.strftime("%H:%M:%S")
-    line = f"[{timestamp}] {text}\n"
-    print(line.strip())
-    with open(LOG_FILE, "a") as f: f.write(line)
+    print("\n[INFO] Stopping script...")
 
 
 signal.signal(signal.SIGINT, handle_sigint)
@@ -128,11 +117,11 @@ signal.signal(signal.SIGINT, handle_sigint)
 # ------------------------------------------------------------
 
 def connect_mavlink():
-    log_event(f"[INFO] Connecting to MAVLink: {MAVLINK_CONNECTION}")
+    print(f"[INFO] Connecting to MAVLink: {MAVLINK_CONNECTION}")
     master = mavutil.mavlink_connection(MAVLINK_CONNECTION, baud=MAVLINK_BAUD)
     master.wait_heartbeat()
-    log_event("[INFO] MAVLink heartbeat received")
-    log_event(f"[INFO] System ID: {master.target_system}, Component ID: {master.target_component}")
+    print("[INFO] MAVLink heartbeat received")
+    print(f"[INFO] System ID: {master.target_system}, Component ID: {master.target_component}")
     return master
 
 
@@ -149,43 +138,44 @@ def set_mode(master, mode_name):
         raise RuntimeError(f"Flight mode '{mode_name}' not available")
     mode_id = mapping[mode_name]
     master.set_mode(mode_id)
-    log_event(f"[INFO] Requested mode: {mode_name}")
+    print(f"[INFO] Requested mode: {mode_name}")
 
 
 def arm_vehicle(master):
-    log_event("[INFO] Arming vehicle...")
+    print("[INFO] Arming vehicle...")
     master.arducopter_arm()
     master.motors_armed_wait()
-    log_event("[INFO] Vehicle armed")
+    print("[INFO] Vehicle armed")
 
 
 def disarm_vehicle(master):
-    log_event("[INFO] Disarming vehicle...")
+    print("[INFO] Disarming vehicle...")
     master.arducopter_disarm()
     time.sleep(1.0)
 
+
 def disable_ugv_avoidance(master):
     """
-    CRITICAL FIX: Turns off ArduPilot Object/Proximity Avoidance.
-    If left on, the drone sees the UGV as a collidable wall and gracefully
-    slides sideways to land in the dirt. We must kill this parameter!
+    Optional mission-specific fix:
+    Disable ArduPilot proximity/object avoidance so the UAV does not
+    try to dodge the UGV when attempting to land on it.
     """
-    log_event("[INFO] Force-disabling AVOID_ENABLE so the Drone doesn't dodge the UGV")
+    print("[INFO] Force-disabling AVOID_ENABLE")
     try:
         master.mav.param_set_send(
-            master.target_system, master.target_component,
-            b'AVOID_ENABLE', 0, mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+            master.target_system,
+            master.target_component,
+            b'AVOID_ENABLE',
+            0,
+            mavutil.mavlink.MAV_PARAM_TYPE_REAL32
         )
         time.sleep(0.5)
-    except:
+    except Exception:
         pass
 
 
 def takeoff(master, altitude_m):
-    """
-    I use MAV_CMD_NAV_TAKEOFF in GUIDED mode.
-    """
-    log_event(f"[INFO] Taking off to {altitude_m:.2f} m")
+    print(f"[INFO] Taking off to {altitude_m:.2f} m")
     master.mav.command_long_send(
         master.target_system,
         master.target_component,
@@ -198,19 +188,16 @@ def takeoff(master, altitude_m):
 
 def send_body_velocity(master, vx, vy, vz):
     """
-    I send body-frame velocity in GUIDED mode.
+    Send body-frame velocity in GUIDED mode.
 
     vx = forward (m/s)
     vy = right   (m/s)
     vz = down    (m/s)
 
-    This uses SET_POSITION_TARGET_LOCAL_NED in MAV_FRAME_BODY_NED.
-    ArduPilot supports velocity control in Guided mode and expects these commands
-    to be resent continuously. If I stop sending them, the vehicle stops following them.
+    Uses SET_POSITION_TARGET_LOCAL_NED in MAV_FRAME_BODY_NED.
     """
     frame_ned = mavutil.mavlink.MAV_FRAME_BODY_NED
 
-    # Velocity-only type mask
     type_mask = (
         mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE |
         mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE |
@@ -223,22 +210,19 @@ def send_body_velocity(master, vx, vy, vz):
     )
 
     master.mav.set_position_target_local_ned_send(
-        int(time.time() * 1000),       # time_boot_ms
+        int(time.time() * 1000),
         master.target_system,
         master.target_component,
         frame_ned,
         type_mask,
-        0.0, 0.0, 0.0,                 # position (ignored)
-        vx, vy, vz,                    # velocity
-        0.0, 0.0, 0.0,                 # acceleration (ignored)
-        0.0, 0.0                       # yaw, yaw_rate (ignored)
+        0.0, 0.0, 0.0,
+        vx, vy, vz,
+        0.0, 0.0, 0.0,
+        0.0, 0.0
     )
 
 
 def get_relative_altitude_m(master):
-    """
-    I read GLOBAL_POSITION_INT and convert relative_alt from millimeters to meters.
-    """
     msg = master.recv_match(type="GLOBAL_POSITION_INT", blocking=False)
     if msg is None:
         return None
@@ -246,29 +230,23 @@ def get_relative_altitude_m(master):
 
 
 def wait_until_altitude(master, target_alt_m, timeout_s):
-    """
-    I wait until the reported relative altitude gets close enough to target altitude.
-    """
     start = time.time()
     while time.time() - start < timeout_s and running:
         alt = get_relative_altitude_m(master)
         if alt is not None:
-            log_event(f"[INFO] Current altitude: {alt:.2f} m")
+            print(f"[INFO] Current altitude: {alt:.2f} m")
             if alt >= target_alt_m * 0.85:
-                log_event("[INFO] Takeoff altitude reached")
+                print("[INFO] Takeoff altitude reached")
                 return True
         time.sleep(0.2)
     return False
 
 
 # ------------------------------------------------------------
-# ZED 2i helpers
+# ZED helpers
 # ------------------------------------------------------------
 
 def open_zed():
-    """
-    I open the ZED X and retrieve the left image stream plus calibration.
-    """
     zed = sl.Camera()
 
     init_params = sl.InitParameters()
@@ -279,7 +257,7 @@ def open_zed():
 
     status = zed.open(init_params)
     if status != sl.ERROR_CODE.SUCCESS:
-        raise RuntimeError(f"Failed to open ZED X: {status}")
+        raise RuntimeError(f"Failed to open ZED camera: {status}")
 
     runtime_params = sl.RuntimeParameters()
     image_mat = sl.Mat()
@@ -293,10 +271,9 @@ def open_zed():
         [0.0, 0.0, 1.0]
     ], dtype=np.float32)
 
-    # OpenCV expects a distortion vector.
     dist_coeffs = np.array(left_calib.disto[:5], dtype=np.float32)
 
-    log_event("[INFO] ZED X opened")
+    print("[INFO] ZED camera opened")
     print("[INFO] Camera matrix:")
     print(camera_matrix)
 
@@ -317,11 +294,8 @@ def get_bgr_frame(zed, runtime_params, image_mat):
 # ------------------------------------------------------------
 
 def create_aruco_detector():
-    # 🔴 VERY IMPORTANT: We know from our previous tests your marker is 6X6! 
-    # ChatGPT incorrectly guessed DICT_4X4_50. I've corrected it so it actually sees your UGV!
     dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_1000)
 
-    # Support old and new OpenCV APIs
     if hasattr(cv2.aruco, "DetectorParameters"):
         params = cv2.aruco.DetectorParameters()
     else:
@@ -344,9 +318,6 @@ def create_aruco_detector():
 
 
 def estimate_single_marker_pose(corners, ids, camera_matrix, dist_coeffs, wanted_id, marker_size_m):
-    """
-    I look for the marker ID I care about and estimate its pose.
-    """
     if ids is None or len(ids) == 0:
         return False, None, None
 
@@ -364,7 +335,6 @@ def estimate_single_marker_pose(corners, ids, camera_matrix, dist_coeffs, wanted
         tvec = tvecs[idx].reshape(3)
         return True, tvec, corners[idx]
 
-    # Fallback solvePnP path
     obj_pts = np.array([
         [-marker_size_m / 2,  marker_size_m / 2, 0],
         [ marker_size_m / 2,  marker_size_m / 2, 0],
@@ -385,7 +355,7 @@ def estimate_single_marker_pose(corners, ids, camera_matrix, dist_coeffs, wanted
 
 def camera_pose_to_body_errors(tvec):
     """
-    OpenCV camera frame to Downward Frame Mapper.
+    Convert OpenCV camera pose to body-frame landing errors.
     """
     x_cam, y_cam, z_cam = tvec
 
@@ -397,6 +367,7 @@ def camera_pose_to_body_errors(tvec):
         forward_error_m = FORWARD_SIGN * (y_cam)
 
     down_distance_m = z_cam
+
     return forward_error_m, right_error_m, down_distance_m
 
 
@@ -406,13 +377,13 @@ def camera_pose_to_body_errors(tvec):
 
 def main():
     master = connect_mavlink()
-    disable_ugv_avoidance(master) # Ensure drone doesn't dodge UGV!
-    
+    disable_ugv_avoidance(master)
+
     zed, runtime_params, image_mat, camera_matrix, dist_coeffs = open_zed()
     detect_markers = create_aruco_detector()
 
-    log_event("\n[INFO] Starting autonomous Challenge 1 logic")
-    log_event("[INFO] I am switching to GUIDED, arming, and taking off")
+    print("\n[INFO] Starting autonomous Challenge 1 logic")
+    print("[INFO] Switching to GUIDED, arming, and taking off")
 
     set_mode(master, "GUIDED")
     time.sleep(1.0)
@@ -423,13 +394,14 @@ def main():
     takeoff(master, CRUISE_ALT_M)
     reached = wait_until_altitude(master, CRUISE_ALT_M, TAKEOFF_TIMEOUT_S)
     if not reached:
-        log_event("[WARN] I did not confirm target altitude in time, but I will continue carefully")
+        print("[WARN] Target altitude not confirmed in time; continuing carefully")
 
-    log_event("[INFO] Now I start visual tracking and autonomous approach")
+    print("[INFO] Starting visual tracking and autonomous approach")
 
     last_marker_seen_time = 0.0
     stable_frames = 0
     final_land_sent = False
+    follow_start_time = None
 
     while running:
         frame = get_bgr_frame(zed, runtime_params, image_mat)
@@ -437,71 +409,115 @@ def main():
             continue
 
         corners, ids, _ = detect_markers(frame)
-        
-        # Priority 1: Search for the nested 4-inch marker (crucial to prevent FOV clipping at the bottom!)
+
+        # Priority 1: small marker ID 6
         used_id = SMALL_MARKER_ID
         found, tvec, marker_corners = estimate_single_marker_pose(
-            corners, ids, camera_matrix, dist_coeffs, SMALL_MARKER_ID, SMALL_MARKER_SIZE_M
+            corners, ids, camera_matrix, dist_coeffs,
+            SMALL_MARKER_ID, SMALL_MARKER_SIZE_M
         )
-        
-        # Priority 2: Fallback to the 12-inch marker for high-altitude tracing
+
+        # Priority 2: larger marker ID 5
         if not found:
             used_id = MARKER_ID
             found, tvec, marker_corners = estimate_single_marker_pose(
-                corners, ids, camera_matrix, dist_coeffs, MARKER_ID, MARKER_SIZE_M
+                corners, ids, camera_matrix, dist_coeffs,
+                MARKER_ID, MARKER_SIZE_M
             )
 
         now = time.time()
+
+        follow_elapsed = 0.0
+        follow_done = False
+
+        if follow_start_time is not None:
+            follow_elapsed = now - follow_start_time
+            follow_done = follow_elapsed >= FOLLOW_BEFORE_LAND_S
 
         if found:
             last_marker_seen_time = now
             stable_frames += 1
 
+            # Start the 10-second follow timer only when ID 5 is first acquired
+            if follow_start_time is None and ids is not None:
+                ids_flat = ids.flatten()
+                if MARKER_ID in ids_flat:
+                    follow_start_time = now
+                    follow_elapsed = 0.0
+                    follow_done = False
+                    print(f"[INFO] Marker ID {MARKER_ID} acquired -> starting {FOLLOW_BEFORE_LAND_S:.1f}s follow phase")
+
             forward_error_m, right_error_m, down_distance_m = camera_pose_to_body_errors(tvec)
             xy_error_m = math.hypot(forward_error_m, right_error_m)
 
-            # Proportional XY tracking
             vx = clamp(KP_FORWARD * forward_error_m, -MAX_XY_SPEED_MPS, MAX_XY_SPEED_MPS)
             vy = clamp(KP_RIGHT * right_error_m, -MAX_XY_SPEED_MPS, MAX_XY_SPEED_MPS)
-
             vz = 0.0
 
             if not final_land_sent:
-                if stable_frames >= MIN_STABLE_FRAMES and xy_error_m < CENTER_TOLERANCE_M:
-                    if down_distance_m > FINAL_SWITCH_TO_LAND_DOWN_M:
-                        vz = DESCENT_SPEED_MPS
-                    else:
-                        if xy_error_m < FINAL_CENTER_TOLERANCE_M:
-                            log_event("[INFO] Low and centered -> switching to LAND")
-                            send_body_velocity(master, 0.0, 0.0, 0.0)
-                            set_mode(master, "LAND")
-                            final_land_sent = True
-                        else:
-                            vz = 0.0
-
-                if not final_land_sent:
+                # Phase 1: follow only, no descent yet
+                if not follow_done:
+                    vz = 0.0
                     send_body_velocity(master, vx, vy, vz)
+
+                # Phase 2: precision landing after follow phase is complete
+                else:
+                    if stable_frames >= MIN_STABLE_FRAMES and xy_error_m < CENTER_TOLERANCE_M:
+                        if down_distance_m > FINAL_SWITCH_TO_LAND_DOWN_M:
+                            vz = DESCENT_SPEED_MPS
+                        else:
+                            if xy_error_m < FINAL_CENTER_TOLERANCE_M:
+                                print("[INFO] Follow complete, low and centered -> switching to LAND")
+                                send_body_velocity(master, 0.0, 0.0, 0.0)
+                                set_mode(master, "LAND")
+                                final_land_sent = True
+                            else:
+                                vz = 0.0
+
+                    if not final_land_sent:
+                        send_body_velocity(master, vx, vy, vz)
 
             if SHOW_DEBUG_WINDOW:
                 if marker_corners is not None:
                     cv2.aruco.drawDetectedMarkers(frame, [marker_corners], np.array([[used_id]]))
 
-                text1 = f"fwd_err={forward_error_m:+.2f}m right_err={right_error_m:+.2f}m"
+                text1 = f"marker={used_id} fwd_err={forward_error_m:+.2f}m right_err={right_error_m:+.2f}m"
                 text2 = f"down={down_distance_m:.2f}m xy_err={xy_error_m:.2f}m stable={stable_frames}"
-                mode_text = "LAND" if final_land_sent else "GUIDED_TRACK"
 
-                cv2.putText(frame, text1, (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(frame, text2, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(frame, mode_text, (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                if follow_start_time is None:
+                    text3 = f"follow=waiting for ID {MARKER_ID}"
+                else:
+                    text3 = f"follow={follow_elapsed:.1f}/{FOLLOW_BEFORE_LAND_S:.1f}s"
+
+                if final_land_sent:
+                    mode_text = "LAND"
+                elif not follow_done:
+                    mode_text = "FOLLOW_PHASE"
+                else:
+                    mode_text = "PRECISION_LAND"
+
+                cv2.putText(frame, text1, (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
+                cv2.putText(frame, text2, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
+                cv2.putText(frame, text3, (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2)
+                cv2.putText(frame, mode_text, (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2)
 
         else:
             stable_frames = 0
+
             if not final_land_sent:
                 send_body_velocity(master, 0.0, 0.0, 0.0)
 
             if SHOW_DEBUG_WINDOW:
                 lost_time = now - last_marker_seen_time if last_marker_seen_time > 0 else 999.0
-                cv2.putText(frame, f"MARKER LOST {lost_time:.2f}s", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                cv2.putText(frame, f"MARKER LOST {lost_time:.2f}s", (20, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+                if follow_start_time is None:
+                    cv2.putText(frame, f"waiting for ID {MARKER_ID} to start follow timer", (20, 65),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                else:
+                    cv2.putText(frame, f"follow={follow_elapsed:.1f}/{FOLLOW_BEFORE_LAND_S:.1f}s", (20, 65),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         if SHOW_DEBUG_WINDOW:
             cv2.imshow("Challenge1_ZED_X_Aruco", frame)
@@ -515,7 +531,7 @@ def main():
 
         time.sleep(0.05)
 
-    log_event("[INFO] Exiting. I send zero velocity before shutdown.")
+    print("[INFO] Exiting. Sending zero velocity before shutdown.")
     try:
         send_body_velocity(master, 0.0, 0.0, 0.0)
     except Exception:
@@ -525,7 +541,7 @@ def main():
         cv2.destroyAllWindows()
 
     zed.close()
-    log_event("[INFO] Done")
+    print("[INFO] Done")
 
 
 if __name__ == "__main__":
