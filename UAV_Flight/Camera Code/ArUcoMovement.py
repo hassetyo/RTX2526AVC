@@ -398,6 +398,13 @@ def draw_distance_overlay(
         )
         y += line_h
 
+LOG_FILE = "Challenge1_official_log.txt"
+
+def log_event(text): # helper to write required logs
+    timestamp = time.strftime("%H:%M:%S")
+    line = f"[{timestamp}] {text}\n"
+    print(line.strip())
+    with open(LOG_FILE, "a") as f: f.write(line)
 
 class UGVCommander:
     def __init__(
@@ -445,7 +452,7 @@ class UGVCommander:
     def ensure_armed(self):
         if self.arm_sent:
             return
-        print("[UGV] Sending ARM command over bridge...")
+        log_event("[UGV] Sending ARM command over bridge...")
         self.bridge.send_command(self._next_seq(), v2v_bridge.CMD_ARM, 0)
         self.arm_sent = True
         self.last_status_text = "arming sent"
@@ -454,7 +461,7 @@ class UGVCommander:
     def send_turn_left(self):
         if self.last_motion == "turn_left":
             return
-        print("[UGV] TURN LEFT")
+        log_event("[UGV] TURN LEFT")
         self.bridge.send_command(self._next_seq(), v2v_bridge.CMD_TURN_LEFT, 0)
         self.last_motion = "turn_left"
         self.last_status_text = "turning left"
@@ -462,7 +469,7 @@ class UGVCommander:
     def send_turn_right(self):
         if self.last_motion == "turn_right":
             return
-        print("[UGV] TURN RIGHT")
+        log_event("[UGV] TURN RIGHT")
         self.bridge.send_command(self._next_seq(), v2v_bridge.CMD_TURN_RIGHT, 0)
         self.last_motion = "turn_right"
         self.last_status_text = "turning right"
@@ -470,7 +477,7 @@ class UGVCommander:
     def send_stop(self, force: bool = False):
         if not force and self.last_motion == "stopped":
             return
-        print("[UGV] STOP")
+        log_event("[UGV] STOP")
         self.bridge.send_command(self._next_seq(), v2v_bridge.CMD_STOP, 0)
         self.last_motion = "stopped"
         self.last_status_text = "stopped"
@@ -484,7 +491,7 @@ class UGVCommander:
         duration = max(step_m / max(self.drive_speed_mps, 1e-6), 0.15)
         margin = 0.25
 
-        print(f"[UGV] FORWARD STEP {step_m:.3f} m")
+        log_event(f"[UGV] FORWARD STEP {step_m:.3f} m")
         self.bridge.send_command(self._next_seq(), v2v_bridge.CMD_MOVE_2FT, 0)
         self.last_motion = "forward"
         self.last_status_text = f"forward {step_m:.2f} m"
@@ -727,7 +734,7 @@ def main():
 
     print("Press q to quit.")
     print("Press s to save a screenshot.")
-    print(
+    log_event(
         f"Tracking UGV marker {args.ugv_marker_id} toward destination marker {args.dest_marker_id}."
     )
 
@@ -735,7 +742,7 @@ def main():
         while True:
             frame = cam.get_frame()
             if frame is None:
-                print("Failed to read frame.")
+                log_event("Failed to read frame.")
                 commander.handle_marker_loss()
                 continue
 
