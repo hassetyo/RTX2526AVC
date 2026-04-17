@@ -39,7 +39,7 @@ CONNECTION_STRING = "/dev/ttyACM0"
 BAUD_RATE         = 57600
 
 # ─── FLIGHT PARAMS ───────────────────────────────────────────────────────────────
-TARGET_ALT_M       = 2.0              # metres to climb to
+TARGET_ALT_M       = 0.15              # metres to climb to
 HOVER_WAIT_S       = 15.0             # seconds to hover before starting ArUco tracking
 ALT_TOLERANCE_M    = 0.25             # how close to target counts as "reached"
 CLIMB_LOOP_DT      = 0.10
@@ -72,9 +72,6 @@ def log_event(text):
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] {text}"
     print(line)
-    with open(LOG_FILE, "a") as f:
-        f.write(line + "\n")
-
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # CAMERA & ARUCO (from precision_land.py)
@@ -344,7 +341,7 @@ def send_guided_velocity(master, vx, vy, vz):
         0, 0, 0,
         float(vx), float(vy), float(vz),
         0, 0, 0, 0, 0)
-    print(f"  Sent velocity cmd: vx={vx:.2f} m/s, vy={vy:.2f} m/s, vz={vz:.2f} m/s", end="\r", flush=True)
+    print(f"[{float(vx)}] [{float(vy)}] {float(vz)}")
 
 
 def send_landing_target(master, x_b, y_b, z_b):

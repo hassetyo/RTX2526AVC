@@ -126,11 +126,11 @@ signal.signal(signal.SIGINT, handle_sigint)
 # ------------------------------------------------------------
 
 def connect_mavlink():
-    print(f"[INFO] Connecting to MAVLink: {MAVLINK_CONNECTION}")
+    log_event(f"[INFO] Connecting to MAVLink: {MAVLINK_CONNECTION}")
     master = mavutil.mavlink_connection(MAVLINK_CONNECTION, baud=MAVLINK_BAUD)
     master.wait_heartbeat()
-    print("[INFO] MAVLink heartbeat received")
-    print(f"[INFO] System ID: {master.target_system}, Component ID: {master.target_component}")
+    log_event("[INFO] MAVLink heartbeat received")
+    log_event(f"[INFO] System ID: {master.target_system}, Component ID: {master.target_component}")
     return master
 
 
@@ -147,18 +147,18 @@ def set_mode(master, mode_name):
         raise RuntimeError(f"Flight mode '{mode_name}' not available")
     mode_id = mapping[mode_name]
     master.set_mode(mode_id)
-    print(f"[INFO] Requested mode: {mode_name}")
+    log_event(f"[INFO] Requested mode: {mode_name}")
 
 
 def arm_vehicle(master):
-    print("[INFO] Arming vehicle...")
+    log_event("[INFO] Arming vehicle...")
     master.arducopter_arm()
     master.motors_armed_wait()
-    print("[INFO] Vehicle armed")
+    log_event("[INFO] Vehicle armed")
 
 
 def disarm_vehicle(master):
-    print("[INFO] Disarming vehicle...")
+    log_event("[INFO] Disarming vehicle...")
     master.arducopter_disarm()
     time.sleep(1.0)
 
@@ -167,7 +167,7 @@ def takeoff(master, altitude_m):
     """
     I use MAV_CMD_NAV_TAKEOFF in GUIDED mode.
     """
-    print(f"[INFO] Taking off to {altitude_m:.2f} m")
+    log_event(f"[INFO] Taking off to {altitude_m:.2f} m")
     master.mav.command_long_send(
         master.target_system,
         master.target_component,
@@ -236,9 +236,9 @@ def wait_until_altitude(master, target_alt_m, timeout_s):
     while time.time() - start < timeout_s and running:
         alt = get_relative_altitude_m(master)
         if alt is not None:
-            print(f"[INFO] Current altitude: {alt:.2f} m")
+            log_event(f"[INFO] Current altitude: {alt:.2f} m")
             if alt >= target_alt_m * 0.85:
-                print("[INFO] Takeoff altitude reached")
+                log_event("[INFO] Takeoff altitude reached")
                 return True
         time.sleep(0.2)
     return False
@@ -281,10 +281,10 @@ def open_zed():
     # OpenCV expects a distortion vector. I use the first 5 terms.
     dist_coeffs = np.array(left_calib.disto[:5], dtype=np.float32)
 
-    print("[INFO] ZED 2i opened")
-    print("[INFO] Camera matrix:")
-    print(camera_matrix)
-    print("[INFO] Dist coeffs:", dist_coeffs)
+    log_event("[INFO] ZED 2i opened")
+    log_event("[INFO] Camera matrix:")
+    log_event(str(camera_matrix))
+    log_event(f"[INFO] Dist coeffs: {dist_coeffs}")
 
     return zed, runtime_params, image_mat, camera_matrix, dist_coeffs
 
@@ -403,6 +403,14 @@ def camera_pose_to_body_errors(tvec):
     down_distance_m = z_cam
     return forward_error_m, right_error_m, down_distance_m
 
+# official logging file for the competition refs
+LOG_FILE = "Challenge1_official_log.txt"
+
+def log_event(text): # helper to write required logs
+    timestamp = time.strftime("%H:%M:%S")
+    line = f"[{timestamp}] {text}\n"
+    print(line.strip())
+    with open(LOG_FILE, "a") as f: f.write(line)
 
 # ------------------------------------------------------------
 # Mission logic
@@ -413,120 +421,127 @@ def main():
     zed, runtime_params, image_mat, camera_matrix, dist_coeffs = open_zed()
     detect_markers = create_aruco_detector()
 
-    print("\n[INFO] Starting autonomous Challenge 1 logic")
-    print("[INFO] I am switching to GUIDED, arming, and taking off")
+    log_event("\n[INFO] Starting autonomous Challenge 1 logic")
+    log_event("[INFO] I am switching to GUIDED, arming, and taking off")
 
-    set_mode(master, "GUIDED")
+    set_mode(master, "ALT_HOLD")
     time.sleep(1.0)
 
     arm_vehicle(master)
     time.sleep(1.0)
 
-    takeoff(master, CRUISE_ALT_M)
-    reached = wait_until_altitude(master, CRUISE_ALT_M, TAKEOFF_TIMEOUT_S)
-    if not reached:
-        print("[WARN] I did not confirm target altitude in time, but I will continue carefully")
+    try:
+        takeoff(master, CRUISE_ALT_M)
+        reached = wait_until_altitude(master, CRUISE_ALT_M, TAKEOFF_TIMEOUT_S)
+        if not reached:
+            log_event("[WARN] I did not confirm target altitude in time, but I will continue carefully")
 
-    print("[INFO] Now I start visual tracking and autonomous approach")
+        log_event("[INFO] Now I start visual tracking and autonomous approach")
 
-    last_marker_seen_time = 0.0
-    stable_frames = 0
-    final_land_sent = False
+        last_marker_seen_time = 0.0
+        stable_frames = 0
+        final_land_sent = False
+        running = True
 
-    while running:
-        frame = get_bgr_frame(zed, runtime_params, image_mat)
-        if frame is None:
-            continue
+        while running:
+            frame = get_bgr_frame(zed, runtime_params, image_mat)
+            if frame is None:
+                continue
 
-        corners, ids, _ = detect_markers(frame)
-        found, tvec, marker_corners = estimate_single_marker_pose(
-            corners, ids, camera_matrix, dist_coeffs, MARKER_ID, MARKER_SIZE_M
-        )
+            corners, ids, _ = detect_markers(frame)
+            found, tvec, marker_corners = estimate_single_marker_pose(
+                corners, ids, camera_matrix, dist_coeffs, MARKER_ID, MARKER_SIZE_M
+            )
 
-        now = time.time()
+            now = time.time()
 
-        if found:
-            last_marker_seen_time = now
-            stable_frames += 1
+            if found:
+                last_marker_seen_time = now
+                stable_frames += 1
 
-            forward_error_m, right_error_m, down_distance_m = camera_pose_to_body_errors(tvec)
-            xy_error_m = math.hypot(forward_error_m, right_error_m)
+                forward_error_m, right_error_m, down_distance_m = camera_pose_to_body_errors(tvec)
+                xy_error_m = math.hypot(forward_error_m, right_error_m)
 
-            # Proportional XY tracking
-            vx = clamp(KP_FORWARD * forward_error_m, -MAX_XY_SPEED_MPS, MAX_XY_SPEED_MPS)
-            vy = clamp(KP_RIGHT * right_error_m, -MAX_XY_SPEED_MPS, MAX_XY_SPEED_MPS)
+                # Proportional XY tracking
+                vx = clamp(KP_FORWARD * forward_error_m, -MAX_XY_SPEED_MPS, MAX_XY_SPEED_MPS)
+                vy = clamp(KP_RIGHT * right_error_m, -MAX_XY_SPEED_MPS, MAX_XY_SPEED_MPS)
 
-            # Descent rule:
-            # 1) hold altitude until centered enough and marker is stable
-            # 2) descend slowly while keeping XY centered
-            # 3) when very low and centered, switch to LAND
-            vz = 0.0
+                # Descent rule:
+                # 1) hold altitude until centered enough and marker is stable
+                # 2) descend slowly while keeping XY centered
+                # 3) when very low and centered, switch to LAND
+                vz = 0.0
 
-            if not final_land_sent:
-                if stable_frames >= MIN_STABLE_FRAMES and xy_error_m < CENTER_TOLERANCE_M:
-                    if down_distance_m > FINAL_SWITCH_TO_LAND_DOWN_M:
-                        vz = DESCENT_SPEED_MPS
-                    else:
-                        if xy_error_m < FINAL_CENTER_TOLERANCE_M:
-                            print("[INFO] Low and centered -> switching to LAND")
-                            send_body_velocity(master, 0.0, 0.0, 0.0)
-                            set_mode(master, "LAND")
-                            final_land_sent = True
-                        else:
-                            vz = 0.0
-
-                # If I am not in LAND yet, I keep commanding guided velocity
                 if not final_land_sent:
-                    send_body_velocity(master, vx, vy, vz)
+                    if stable_frames >= MIN_STABLE_FRAMES and xy_error_m < CENTER_TOLERANCE_M:
+                        if down_distance_m > FINAL_SWITCH_TO_LAND_DOWN_M:
+                            vz = DESCENT_SPEED_MPS
+                        else:
+                            if xy_error_m < FINAL_CENTER_TOLERANCE_M:
+                                log_event("[INFO] Low and centered -> switching to LAND")
+                                send_body_velocity(master, 0.0, 0.0, 0.0)
+                                set_mode(master, "LAND")
+                                final_land_sent = True
+                            else:
+                                vz = 0.0
 
-            # Debug output
+                    # If I am not in LAND yet, I keep commanding guided velocity
+                    if not final_land_sent:
+                        send_body_velocity(master, vx, vy, vz)
+
+                # Debug output
+                if SHOW_DEBUG_WINDOW:
+                    if marker_corners is not None:
+                        cv2.aruco.drawDetectedMarkers(frame, [marker_corners], np.array([[MARKER_ID]]))
+
+                    text1 = f"fwd_err={forward_error_m:+.2f}m right_err={right_error_m:+.2f}m"
+                    text2 = f"down={down_distance_m:.2f}m xy_err={xy_error_m:.2f}m stable={stable_frames}"
+                    mode_text = "LAND" if final_land_sent else "GUIDED_TRACK"
+
+                    cv2.putText(frame, text1, (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.putText(frame, text2, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.putText(frame, mode_text, (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+
+            else:
+                stable_frames = 0
+
+                # If I lose the marker, I command zero velocity and let the drone hold
+                if not final_land_sent:
+                    send_body_velocity(master, 0.0, 0.0, 0.0)
+
+                if SHOW_DEBUG_WINDOW:
+                    lost_time = now - last_marker_seen_time if last_marker_seen_time > 0 else 999.0
+                    cv2.putText(
+                        frame,
+                        f"MARKER LOST {lost_time:.2f}s",
+                        (20, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        (0, 0, 255),
+                        2
+                    )
+
             if SHOW_DEBUG_WINDOW:
-                if marker_corners is not None:
-                    cv2.aruco.drawDetectedMarkers(frame, [marker_corners], np.array([[MARKER_ID]]))
+                cv2.imshow("Challenge1_ZED2i_Aruco", frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
 
-                text1 = f"fwd_err={forward_error_m:+.2f}m right_err={right_error_m:+.2f}m"
-                text2 = f"down={down_distance_m:.2f}m xy_err={xy_error_m:.2f}m stable={stable_frames}"
-                mode_text = "LAND" if final_land_sent else "GUIDED_TRACK"
-
-                cv2.putText(frame, text1, (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(frame, text2, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(frame, mode_text, (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-
-        else:
-            stable_frames = 0
-
-            # If I lose the marker, I command zero velocity and let the drone hold
+            # Safety: if marker has been lost for a while before final LAND,
+            # I continue holding with zero velocity.
             if not final_land_sent:
-                send_body_velocity(master, 0.0, 0.0, 0.0)
+                if last_marker_seen_time > 0 and (now - last_marker_seen_time) > MARKER_LOST_HOLD_S:
+                    send_body_velocity(master, 0.0, 0.0, 0.0)
 
-            if SHOW_DEBUG_WINDOW:
-                lost_time = now - last_marker_seen_time if last_marker_seen_time > 0 else 999.0
-                cv2.putText(
-                    frame,
-                    f"MARKER LOST {lost_time:.2f}s",
-                    (20, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    (0, 0, 255),
-                    2
-                )
+            # I run roughly at 20 Hz so the guided velocity command is refreshed continuously.
+            time.sleep(0.05)
 
-        if SHOW_DEBUG_WINDOW:
-            cv2.imshow("Challenge1_ZED2i_Aruco", frame)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                break
+    except KeyboardInterrupt:
+        log_event("[INFO] Keyboard interrupt received, stopping...")
+        running = False
+        
 
-        # Safety: if marker has been lost for a while before final LAND,
-        # I continue holding with zero velocity.
-        if not final_land_sent:
-            if last_marker_seen_time > 0 and (now - last_marker_seen_time) > MARKER_LOST_HOLD_S:
-                send_body_velocity(master, 0.0, 0.0, 0.0)
-
-        # I run roughly at 20 Hz so the guided velocity command is refreshed continuously.
-        time.sleep(0.05)
-
-    print("[INFO] Exiting. I send zero velocity before shutdown.")
+    log_event("[INFO] Exiting. I send zero velocity before shutdown.")
     try:
         send_body_velocity(master, 0.0, 0.0, 0.0)
     except Exception:
@@ -536,7 +551,7 @@ def main():
         cv2.destroyAllWindows()
 
     zed.close()
-    print("[INFO] Done")
+    log_event("[INFO] Mission Complete")
 
 
 if __name__ == "__main__":
