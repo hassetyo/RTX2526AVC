@@ -246,91 +246,39 @@ def get_groundspeed(vehicle):
     return vehicle.groundspeed if vehicle.groundspeed is not None else 0.0
 
 
-def drive_distance_velocity(vehicle, distance_m, speed_mps, detection_window_s=1.5):
+def drive_distance_velocity(vehicle, distance_m, speed_mps):
     duration_s = distance_m / speed_mps
     drive_msg = build_velocity_msg(vehicle, speed_mps)
     stop_msg = build_velocity_msg(vehicle, 0.0)
 
-    print(f"Drive start (velocity target): armed={vehicle.armed} mode={vehicle.mode.name}")
+    print(f"Drive start: armed={vehicle.armed} mode={vehicle.mode.name}")
+    print(f"Target duration: {duration_s:.2f} s | target speed: {speed_mps:.3f} m/s")
+
     start_t = time.time()
-    last_print = 0.0
-    movement_detected = False
+    last_print = -1.0
 
     while (time.time() - start_t) < duration_s:
         vehicle.send_mavlink(drive_msg)
+
         elapsed = time.time() - start_t
         groundspeed = get_groundspeed(vehicle)
 
-        if groundspeed >= MOVEMENT_EPS_MPS:
-            movement_detected = True
-
-        if elapsed - last_print >= 1.0:
+        if int(elapsed) != int(last_print):
             print(
                 f"  t={elapsed:4.1f}s armed={vehicle.armed} "
                 f"mode={vehicle.mode.name} groundspeed={groundspeed:.3f} m/s"
             )
             last_print = elapsed
 
-        if elapsed >= detection_window_s and not movement_detected:
-            print("No meaningful movement detected from velocity target.")
-            break
-
         time.sleep(0.1)
 
+    print("Sending stop command...")
     vehicle.send_mavlink(stop_msg)
     time.sleep(0.5)
-    return movement_detected
-
-
-def drive_distance_attitude(vehicle, distance_m, speed_mps):
-    duration_s = distance_m / speed_mps
-    original_wp_speed = None
-
-    if "WP_SPEED" in vehicle.parameters:
-        original_wp_speed = float(vehicle.parameters["WP_SPEED"])
-        vehicle.parameters["WP_SPEED"] = float(speed_mps)
-        time.sleep(0.5)
-        print(f"WP_SPEED set to {speed_mps:.3f} m/s for attitude/throttle test.")
-    else:
-        raise RuntimeError("WP_SPEED parameter not available on this vehicle.")
-
-    drive_msg = build_attitude_msg(vehicle, 1.0, 0.0)
-    stop_msg = build_attitude_msg(vehicle, 0.0, 0.0)
-
-    try:
-        print(f"Drive start (attitude/throttle fallback): armed={vehicle.armed} mode={vehicle.mode.name}")
-        start_t = time.time()
-        last_print = 0.0
-
-        while (time.time() - start_t) < duration_s:
-            vehicle.send_mavlink(drive_msg)
-            elapsed = time.time() - start_t
-
-            if elapsed - last_print >= 1.0:
-                groundspeed = get_groundspeed(vehicle)
-                print(
-                    f"  t={elapsed:4.1f}s armed={vehicle.armed} "
-                    f"mode={vehicle.mode.name} groundspeed={groundspeed:.3f} m/s"
-                )
-                last_print = elapsed
-
-            time.sleep(0.1)
-    finally:
-        vehicle.send_mavlink(stop_msg)
-        time.sleep(0.5)
-        if original_wp_speed is not None:
-            vehicle.parameters["WP_SPEED"] = original_wp_speed
-            time.sleep(0.5)
-            print(f"WP_SPEED restored to {original_wp_speed:.3f} m/s.")
 
 
 def drive_distance(vehicle, distance_m, speed_mps):
-    moved = drive_distance_velocity(vehicle, distance_m, speed_mps)
-    if moved:
-        return
-
-    print("Falling back to SET_ATTITUDE_TARGET for non-GPS forward motion.")
-    drive_distance_attitude(vehicle, distance_m, speed_mps)
+    drive_distance_velocity(vehicle, distance_m, speed_mps)
 
 
 def main():
@@ -339,6 +287,7 @@ def main():
     print("=============================================")
     print(f"Connecting to UGV at {UGV_CONTROL_PORT}...")
     print(f"Target speed: {SPEED_MPH:.1f} mph ({SPEED_MPS:.4f} m/s)")
+    print(f"Target distance: {INITIAL_DISTANCE_FT:.1f} ft ({INITIAL_DISTANCE_M:.3f} m)")
 
     vehicle = connect(UGV_CONTROL_PORT, wait_ready=True, baud=UGV_BAUD_RATE)
 
@@ -353,8 +302,10 @@ def main():
         print("Move complete. Disarming...")
         vehicle.armed = False
         wait_for_armed(vehicle, False)
+        print("UGV disarmed.")
     finally:
         vehicle.close()
+        print("Connection closed.")
 
 
 if __name__ == "__main__":
