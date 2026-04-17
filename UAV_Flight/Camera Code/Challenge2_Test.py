@@ -101,9 +101,13 @@ STOP_DISTANCE_M      = 0.28    # UGV considers destination reached at this range
 # LOGGING
 # ═════════════════════════════════════════════════════════════════════════════
 
-def log(text: str):
-    ts = time.strftime("%H:%M:%S")
-    print(f"[{ts}] {text}")
+LOG_FILE = "Challenge2_official_log.txt"
+
+def log_event(text): # helper to write required logs
+    timestamp = time.strftime("%H:%M:%S")
+    line = f"[{timestamp}] {text}\n"
+    print(line.strip())
+    with open(LOG_FILE, "a") as f: f.write(line)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -173,7 +177,7 @@ class ZEDCamera:
         else:
             self.dist_coeffs = np.zeros((5, 1), dtype=np.float64)
 
-        log(f"ZED X opened — fx={calib.fx:.1f}  fy={calib.fy:.1f}  "
+        log_event(f"ZED X opened — fx={calib.fx:.1f}  fy={calib.fy:.1f}  "
             f"cx={calib.cx:.1f}  cy={calib.cy:.1f}")
 
     def get_frame(self) -> Optional[np.ndarray]:
@@ -309,7 +313,7 @@ class ArucoDetector:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def fc_connect() -> mavutil.mavfile:
-    log(f"Connecting to flight controller at {FC_CONNECTION_STRING} ...")
+    log_event(f"Connecting to flight controller at {FC_CONNECTION_STRING} ...")
     if FC_CONNECTION_STRING.startswith(("udp:", "tcp:")):
         master = mavutil.mavlink_connection(FC_CONNECTION_STRING)
     else:
@@ -318,7 +322,7 @@ def fc_connect() -> mavutil.mavfile:
     hb = master.wait_heartbeat(timeout=10)
     if not hb:
         raise RuntimeError("No heartbeat — check flight controller connection.")
-    log("Heartbeat received.")
+    log_event("Heartbeat received.")
     _request_streams(master)
     return master
 
@@ -356,7 +360,7 @@ def fc_set_mode(master, mode_name: str):
         mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
         mapping[mode_name],
     )
-    log(f"Mode set -> {mode_name}")
+    log_event(f"Mode set -> {mode_name}")
     time.sleep(0.8)
 
 
@@ -366,14 +370,14 @@ def fc_arm(master) -> bool:
         mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
         0, 1, 0, 0, 0, 0, 0, 0,
     )
-    log("ARM sent — waiting for confirmation ...")
+    log_event("ARM sent — waiting for confirmation ...")
     deadline = time.time() + ARM_TIMEOUT_S
     while time.time() < deadline:
         hb = master.recv_match(type="HEARTBEAT", blocking=True, timeout=1)
         if hb and (hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
-            log("Motors ARMED.")
+            log_event("Motors ARMED.")
             return True
-    log("[WARN] Arm timed out.")
+    log_event("[WARN] Arm timed out.")
     return False
 
 
@@ -383,7 +387,7 @@ def fc_disarm(master):
         mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
         0, 0, 0, 0, 0, 0, 0, 0,
     )
-    log("Disarm command sent.")
+    log_event("Disarm command sent.")
 
 
 def fc_takeoff(master, alt_m: float) -> bool:
@@ -393,15 +397,15 @@ def fc_takeoff(master, alt_m: float) -> bool:
         mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
         0, 0, 0, 0, 0, 0, 0, float(alt_m),
     )
-    log("Takeoff command sent — waiting for ACK ...")
+    log_event("Takeoff command sent — waiting for ACK ...")
     ack = master.recv_match(type="COMMAND_ACK", blocking=True, timeout=5)
     if ack is None:
-        log("[WARN] No ACK for takeoff.")
+        log_event("[WARN] No ACK for takeoff.")
         return False
     if ack.result != mavutil.mavlink.MAV_RESULT_ACCEPTED:
-        log(f"[WARN] Takeoff rejected (result={ack.result}).")
+        log_event(f"[WARN] Takeoff rejected (result={ack.result}).")
         return False
-    log("Takeoff accepted.")
+    log_event("Takeoff accepted.")
     return True
 
 
@@ -471,22 +475,22 @@ def check_rc_emergency(master) -> bool:
 
 
 def land_safely(master):
-    log("Commanding LAND mode ...")
+    log_event("Commanding LAND mode ...")
     fc_set_mode(master, "LAND")
 
-    log("Waiting for auto-disarm ...")
+    log_event("Waiting for auto-disarm ...")
     deadline = time.time() + LAND_TIMEOUT_S
     while time.time() < deadline:
         hb = master.recv_match(type="HEARTBEAT", blocking=True, timeout=2.0)
         if hb and not (hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
-            log("Motors disarmed — touchdown confirmed.")
+            log_event("Motors disarmed — touchdown confirmed.")
             return
         alt, src = get_altitude(master)
         if alt is not None:
             print(f"  Alt: {alt:.2f} m ({src})", end="\r", flush=True)
         time.sleep(0.25)
 
-    log("[WARN] Land timeout — sending disarm fallback.")
+    log_event("[WARN] Land timeout — sending disarm fallback.")
     fc_disarm(master)
     time.sleep(2.0)
 
@@ -503,21 +507,21 @@ def run_takeoff(master, target_alt_m: float) -> bool:
     fc_set_mode(master, "GUIDED")
 
     if not fc_arm(master):
-        log("Arm failed — aborting takeoff.")
+        log_event("Arm failed — aborting takeoff.")
         return False
 
     if not fc_takeoff(master, target_alt_m):
-        log("Takeoff command rejected — aborting.")
+        log_event("Takeoff command rejected — aborting.")
         return False
 
-    log(f"Climbing to {target_alt_m:.2f} m ...")
+    log_event(f"Climbing to {target_alt_m:.2f} m ...")
     t0              = time.time()
     airborne        = False
     last_known_alt  = None
 
     while True:
         if check_rc_emergency(master):
-            log("RC EMERGENCY — landing immediately.")
+            log_event("RC EMERGENCY — landing immediately.")
             land_safely(master)
             return False
 
@@ -532,17 +536,17 @@ def run_takeoff(master, target_alt_m: float) -> bool:
         elapsed = time.time() - t0
         if elapsed > TAKEOFF_TIMEOUT_S:
             if not airborne:
-                log("Takeoff timeout — vehicle never left the ground.")
+                log_event("Takeoff timeout — vehicle never left the ground.")
                 land_safely(master)
                 return False
             else:
-                log("Takeoff timeout — proceeding at current altitude.")
+                log_event("Takeoff timeout — proceeding at current altitude.")
                 break
 
         if last_known_alt is not None and \
                 last_known_alt >= (target_alt_m - ALT_TOLERANCE_M):
             print()
-            log(f"Target altitude reached: {last_known_alt:.2f} m")
+            log_event(f"Target altitude reached: {last_known_alt:.2f} m")
             break
 
         time.sleep(CLIMB_LOOP_DT)
@@ -556,17 +560,17 @@ def run_takeoff(master, target_alt_m: float) -> bool:
 
 def run_hover(master):
     """Hold position for HOVER_WAIT_S seconds using zero-velocity commands."""
-    log(f"Hovering for {HOVER_WAIT_S:.0f} s to stabilise ...")
+    log_event(f"Hovering for {HOVER_WAIT_S:.0f} s to stabilise ...")
     t0 = time.time()
     while (time.time() - t0) < HOVER_WAIT_S:
         if check_rc_emergency(master):
-            log("RC EMERGENCY — landing.")
+            log_event("RC EMERGENCY — landing.")
             land_safely(master)
             return False
         send_velocity(master, 0.0, 0.0, 0.0)
         time.sleep(HOVER_LOOP_DT)
     print()
-    log("Hover complete.")
+    log_event("Hover complete.")
     return True
 
 
@@ -588,7 +592,7 @@ def run_move_to_center(
     send_velocity().  Returns True once both markers are visible, False on
     failure.
     """
-    log("moveToCenter — flying toward field centre while searching for markers ...")
+    log_event("moveToCenter — flying toward field centre while searching for markers ...")
 
     # Diagonal distance: corner to centre of 15×15 yd square in metres
     dist_to_center_m = (15.0 / math.sqrt(2.0)) * 0.9144   # ≈ 9.68 m
@@ -599,21 +603,21 @@ def run_move_to_center(
     # --- Phase 1: move toward centre, climbing if needed ---
     for step in range(steps):
         if check_rc_emergency(master):
-            log("RC EMERGENCY during moveToCenter.")
+            log_event("RC EMERGENCY during moveToCenter.")
             land_safely(master)
             return False
 
         frame = cam.get_frame()
         if frame is None:
             fail_count += 1
-            log(f"Camera read failed ({fail_count}).")
+            log_event(f"Camera read failed ({fail_count}).")
             if fail_count > 5:
                 return False
             continue
 
         poses = detector.detect(frame)
         if _both_visible(poses, ugv_marker_id, dest_marker_id):
-            log(f"Both markers visible at step {step}/{steps} — entering nav loop.")
+            log_event(f"Both markers visible at step {step}/{steps} — entering nav loop.")
             send_velocity(master, 0.0, 0.0, 0.0)
             return True
 
@@ -629,10 +633,10 @@ def run_move_to_center(
         time.sleep(CENTER_STEP_S)
 
     # --- Phase 2: reached centre but markers still not found — keep climbing ---
-    log("Reached estimated centre — hovering and climbing until markers visible.")
+    log_event("Reached estimated centre — hovering and climbing until markers visible.")
     while True:
         if check_rc_emergency(master):
-            log("RC EMERGENCY during post-centre climb.")
+            log_event("RC EMERGENCY during post-centre climb.")
             land_safely(master)
             return False
 
@@ -645,14 +649,14 @@ def run_move_to_center(
 
         poses = detector.detect(frame)
         if _both_visible(poses, ugv_marker_id, dest_marker_id):
-            log("Both markers found after centre climb — entering nav loop.")
+            log_event("Both markers found after centre climb — entering nav loop.")
             send_velocity(master, 0.0, 0.0, 0.0)
             return True
 
         alt, _ = get_altitude(master)
         if alt is not None:
             if alt >= MAX_CLIMB_ALT_M:
-                log("Max altitude reached — markers not found.")
+                log_event("Max altitude reached — markers not found.")
                 return False
             # inch upward
             send_velocity(master, 0.0, 0.0, -CENTER_CLIMB_STEP_M)
@@ -707,7 +711,7 @@ class UGVCommander:
     def ensure_armed(self):
         if self.arm_sent:
             return
-        log("[UGV] Sending ARM ...")
+        log_event("[UGV] Sending ARM ...")
         self.bridge.send_command(self._seq(), v2v_bridge.CMD_ARM, 0)
         self.arm_sent    = True
         self.last_status = "arming sent"
@@ -716,7 +720,7 @@ class UGVCommander:
     def send_turn_left(self):
         if self.last_motion == "turn_left":
             return
-        log("[UGV] TURN LEFT")
+        log_event("[UGV] TURN LEFT")
         self.bridge.send_command(self._seq(), v2v_bridge.CMD_TURN_LEFT, 0)
         self.last_motion = "turn_left"
         self.last_status = "turning left"
@@ -724,7 +728,7 @@ class UGVCommander:
     def send_turn_right(self):
         if self.last_motion == "turn_right":
             return
-        log("[UGV] TURN RIGHT")
+        log_event("[UGV] TURN RIGHT")
         self.bridge.send_command(self._seq(), v2v_bridge.CMD_TURN_RIGHT, 0)
         self.last_motion = "turn_right"
         self.last_status = "turning right"
@@ -732,7 +736,7 @@ class UGVCommander:
     def _send_stop(self, force: bool = False):
         if not force and self.last_motion == "stopped":
             return
-        log("[UGV] STOP")
+        log_event("[UGV] STOP")
         self.bridge.send_command(self._seq(), v2v_bridge.CMD_STOP, 0)
         self.last_motion = "stopped"
         self.last_status = "stopped"
@@ -743,7 +747,7 @@ class UGVCommander:
             return
         step_m   = max(STEP_MIN_M, min(step_m, STEP_MAX_M))
         duration = max(step_m / max(UGV_DRIVE_SPEED_MPS, 1e-6), 0.15)
-        log(f"[UGV] FORWARD STEP {step_m:.3f} m  (GOTO message)")
+        log_event(f"[UGV] FORWARD STEP {step_m:.3f} m  (GOTO message)")
         # Send as a GOTO message so ground_station.py uses velocity drive
         self.bridge.send_message(f"GOTO:{step_m:.3f},0")
         self.last_motion     = "forward"
@@ -883,7 +887,7 @@ def run_guide_ugv(
     Main overhead ArUco guidance loop.  Runs until the UGV reaches the
     destination marker or the user presses 'q'.
     """
-    log(f"guideUGV — tracking UGV marker {ugv_marker_id} "
+    log_event(f"guideUGV — tracking UGV marker {ugv_marker_id} "
         f"toward destination {dest_marker_id}.")
 
     while True:
@@ -923,7 +927,7 @@ def run_guide_ugv(
             if dist_m <= stop_distance_m:
                 ugv_commander._send_stop()
                 ugv_commander.last_status = "destination reached"
-                log("UGV reached destination!")
+                log_event("UGV reached destination!")
                 # Show final frame then break
                 _draw_nav_overlay(display, ugv_p, dest_p, h_err,
                                   ugv_commander.last_status, stop_distance_m,
@@ -967,12 +971,12 @@ def run_guide_ugv(
         cv2.imshow("Challenge 2 — ArUco UGV Nav", display)
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
-            log("User pressed 'q' — exiting nav loop.")
+            log_event("User pressed 'q' — exiting nav loop.")
             break
         elif key == ord("s"):
             fname = "challenge2_screenshot.png"
             cv2.imwrite(fname, display)
-            log(f"Screenshot saved: {fname}")
+            log_event(f"Screenshot saved: {fname}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1032,11 +1036,11 @@ def main():
     args = parse_args()
 
     # ── Open ZED X camera (always — no fallback) ──────────────────────────
-    log("Opening ZED X camera ...")
+    log_event("Opening ZED X camera ...")
     try:
         cam = ZEDCamera(fps=args.fps)
     except Exception as exc:
-        log(f"Failed to open ZED X: {exc}")
+        log_event(f"Failed to open ZED X: {exc}")
         return
 
     detector = ArucoDetector(
@@ -1056,7 +1060,7 @@ def main():
         try:
             master = fc_connect()
         except Exception as exc:
-            log(f"Flight controller connection failed: {exc}")
+            log_event(f"Flight controller connection failed: {exc}")
             cam.close()
             ugv_cmd.close()
             return
@@ -1065,7 +1069,7 @@ def main():
         if not args.testing:
             # ── PHASE 1: Arm + takeoff (GUIDED) ───────────────────────────
             if not run_takeoff(master, args.target_alt):
-                log("Takeoff failed — aborting mission.")
+                log_event("Takeoff failed — aborting mission.")
                 return
 
             # ── PHASE 2: Hover briefly to stabilise ───────────────────────
@@ -1079,13 +1083,13 @@ def main():
                 args.target_alt,
             )
             if not found:
-                log("Could not find both markers — landing.")
+                log_event("Could not find both markers — landing.")
                 land_safely(master)
                 return
 
         else:
-            log("*** TESTING MODE — skipping arm / takeoff / moveToCenter ***")
-            log("Entering UGV guidance loop directly ...")
+            log_event("*** TESTING MODE — skipping arm / takeoff / moveToCenter ***")
+            log_event("Entering UGV guidance loop directly ...")
 
         # ── PHASE 4: Overhead ArUco UGV guidance ──────────────────────────
         run_guide_ugv(
@@ -1102,11 +1106,11 @@ def main():
 
         # ── PHASE 5: Land ─────────────────────────────────────────────────
         if not args.testing and master is not None:
-            log("Mission complete — landing.")
+            log_event("Mission complete — landing.")
             land_safely(master)
 
     except KeyboardInterrupt:
-        log("Keyboard interrupt — commanding land.")
+        log_event("Keyboard interrupt — commanding land.")
         if not args.testing and master is not None:
             try:
                 send_velocity(master, 0.0, 0.0, 0.0)
@@ -1117,7 +1121,7 @@ def main():
     finally:
         ugv_cmd.close()
         cam.close()
-        log("Script finished.")
+        log_event("Script finished.")
 
 
 if __name__ == "__main__":
