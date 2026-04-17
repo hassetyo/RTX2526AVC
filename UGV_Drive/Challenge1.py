@@ -8,7 +8,7 @@ UGV_CONTROL_PORT = "/dev/ttyACM0"
 UGV_BAUD_RATE = 115200
 
 # Mission parameters
-SPEED_MPH = 0.8
+SPEED_MPH = 5.0
 INITIAL_DISTANCE_FT = 60.0     # first leg
 SECOND_DISTANCE_FT = 0.0       # second leg not used in Challenge 1
 TURN_ANGLE_DEG = 75.0
