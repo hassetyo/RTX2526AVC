@@ -592,6 +592,19 @@ def main():
                 break
 
     # ─────────────────────────────────────────────────────────────────────────────
+    except KeyboardInterrupt:
+        print()
+        print("[!] Keyboard interrupt received. Switching to LAND now...")
+        try:
+            #land
+        except Exception as land_err:
+            log_event(f"Landing fallback error: {land_err}")
+            try:
+                # clear_rc_override(master)
+                # disarm_drone(master)
+            except Exception:
+                pass
+
     finally:
         print("[CLEANUP] Shutting down…")
         if DESK_TESTING_NO_PROPELLERS:
