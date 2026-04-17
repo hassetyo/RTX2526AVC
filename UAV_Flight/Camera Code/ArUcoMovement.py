@@ -699,6 +699,7 @@ def get_dictionary_by_name(name: str) -> int:
 
 
 def main():
+    log_event("Starting ArUco UGV Navigator...")
     args = parse_args()
     dictionary = get_dictionary_by_name(args.dict)
 
@@ -841,6 +842,7 @@ def main():
     finally:
         commander.close()
         cam.close()
+        log_event("Ending ArUco UGV Navigator.")
 
 
 if __name__ == "__main__":
