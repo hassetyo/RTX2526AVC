@@ -30,7 +30,7 @@ CONNECTION_STRING = "/dev/ttyACM0"
 BAUD_RATE         = 57600
 
 # ─── FLIGHT PARAMS ───────────────────────────────────────────────────────────────
-TARGET_ALT_M       = 2.0              # metres to climb to
+TARGET_ALT_M       = 0.15              # metres to climb to
 HOVER_WAIT_S       = 15.0             # seconds to hover before starting ArUco tracking
 ALT_TOLERANCE_M    = 0.25             # how close to target counts as "reached"
 CLIMB_LOOP_DT      = 0.10
@@ -63,9 +63,6 @@ def log_event(text):
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] {text}"
     print(line)
-    with open(LOG_FILE, "a") as f:
-        f.write(line + "\n")
-
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # CAMERA & ARUCO (from precision_land.py)
@@ -318,6 +315,7 @@ def send_guided_velocity(master, vx, vy, vz):
         0, 0, 0,
         float(vx), float(vy), float(vz),
         0, 0, 0, 0, 0)
+    print(f"[{float(vx)}] [{float(vy)}] {float(vz)}")
 
 
 def send_landing_target(master, x_b, y_b, z_b):
@@ -434,7 +432,7 @@ def main():
 
     try:
         # ── ARM & TAKEOFF (ALT_HOLD) ─────────────────────────────────────
-        change_mode(master, "ALT_HOLD", "ALTHOLD")
+        change_mode(master, "ALT_HOLD")
         arm(master)
 
         log_event(f"Climbing to {TARGET_ALT_M:.2f} m ...")
@@ -497,7 +495,7 @@ def main():
 
         # ── SWITCH TO GUIDED ──────────────────────────────────────────────
         clear_rc_override(master)
-        change_mode(master, "GUIDED")
+        #change_mode(master, "GUIDED")
 
         # ── ARUCO TRACKING & PRECISION LAND ───────────────────────────────
         state = "SEARCHING"    # SEARCHING -> PREC_LOITER -> LANDING -> LANDED
