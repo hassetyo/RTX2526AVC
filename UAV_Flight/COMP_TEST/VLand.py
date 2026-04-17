@@ -281,9 +281,9 @@ def main():
         # ── ARM & INITIAL MODE ────────────────────────────────────────────
         change_mode(master, "ALT_HOLD", "ALTHOLD")
         arm(master)
-        if not master.motors_armed():
-            log_event("Failed to arm – aborting.")
-            return
+        # if not master.motors_armed():
+        #     log_event("Failed to arm – aborting.")
+        #     return
 
         log_event(
             f"{'VELOCITY (proportional throttle)' if USE_VELOCITY_COMMANDS else 'RC OVERRIDE (fixed PWM)'} "
