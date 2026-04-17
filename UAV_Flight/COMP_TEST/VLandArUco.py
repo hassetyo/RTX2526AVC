@@ -495,7 +495,12 @@ def main():
 
         # ── SWITCH TO GUIDED ──────────────────────────────────────────────
         clear_rc_override(master)
-        #change_mode(master, "GUIDED")
+        
+        change_mode(master, "GUIDED")
+        msg = master.recv_match(type='STATUSTEXT', blocking=False)
+        if msg:
+            print(f"Autopilot Status: {msg.text}")
+
 
         # ── ARUCO TRACKING & PRECISION LAND ───────────────────────────────
         state = "SEARCHING"    # SEARCHING -> PREC_LOITER -> LANDING -> LANDED
