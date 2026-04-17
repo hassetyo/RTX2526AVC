@@ -1,16 +1,24 @@
-'''Contains the simple movement commands for the UAV, such as takeoff, land, and move to a location.
-   '''
+import time
+import math
+import cv2
+import cv2.aruco as aruco
+import numpy as np
+import os
+import argparse
+from typing import Dict, Optional, Tuple
+from dataclasses import dataclass
+from pymavlink import mavutil
+import v2v_bridge
 
-from pymavlink import mavutil  # using the confirmed mavlink pattern instead of dronekit
-import time  # for timing and sleeps
-import math  # for simple comparisons
+# ─── USER CONFIGURATION ────────────────────────────────────────────────────────
+MAVLINK_CONN = "/dev/ttyACM0"      # Or udp:127.0.0.1:14550
+BAUD_RATE    = 921600
 
-# connection settings
-CONNECTION_STRING = "/dev/ttyACM0"   # change to "udp:127.0.0.1:14551" for SITL if needed
-BAUD_RATE = 57600                     # serial speed for hardware connections
+# 🔴 IMPORTANT: Set this to False when you go outside to actually fly!
+# When True, it violently spoofs RC controllers to force motor sounds on your desk.
+DESK_TESTING_NO_PROPELLERS = False
 
 # mission params
-TARGET_ALT = 2.3          # target hover height in meters
 HOVER_TIME_S = 8.0        # how long to hold altitude before landing
 ALT_TOL = 0.12            # acceptable altitude error band
 CLIMB_LOOP_DT = 0.10      # climb loop speed
@@ -24,6 +32,28 @@ THROTTLE_MIN = 1000       # motors off / minimum throttle
 THROTTLE_IDLE = 1150      # props spinning but no real lift
 THROTTLE_CLIMB = 1650     # enough lift to climb
 THROTTLE_HOVER = 1500     # mid-stick hover command for alt hold
+
+# Nested ArUco Marker Setup
+LARGE_MARKER_ID   = 5
+SMALL_MARKER_ID   = 6
+LARGE_MARKER_SIZE = 0.3048   # 12 inches -> meters
+SMALL_MARKER_SIZE = 0.1016   # 4 inches -> meters
+
+USE_SMALL_BELOW_M = 1.0
+SEND_HZ = 15.0
+
+# Flight Logic
+TARGET_HEIGHT_M = 2.3
+TAKEOFF_ALT_TOLERANCE_M = 0.25   # Start vision movement once we are within this band of target alt
+TAKEOFF_MIN_CLIMB_M = 0.15       # Consider the vehicle airborne once it has climbed at least this much
+TAKEOFF_TIMEOUT_S = 20.0
+PLND_STABLE_FRAMES = 15   # Frames of solid tracking before engaging Precision Loiter
+LAND_LATERAL_ERR_M = 0.20 # Meters of allowed lateral error before switching to LAND
+
+# Error Handling
+FAIL_COUNT = 0
+MAX_FAIL_COUNT = 5
+
 
 
 class UAVCommander:
@@ -82,20 +112,7 @@ class UAVCommander:
                 time.sleep(1)
                 return mode
         raise RuntimeError(f"None of these modes were found: {mode_names}. Available: {list(mapping.keys())}")
-    
-    def arm_drone(self, master):  # engages the motors
-        master.mav.command_long_send(
-            master.target_system,
-            master.target_component,
-            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-            0,
-            1, 0, 0, 0, 0, 0, 0,
-        )
-        self.log_event("Arming motors...")
-        ack_msg = master.recv_match(type='COMMAND_ACK', blocking=True, timeout=3)
-        print(f"Change Mode ACK:  {ack_msg}")
-        print("Sent arm command")
-        
+   
 
     def disarm_drone(self, master):  # emergency fallback if needed
         master.mav.command_long_send(
@@ -168,6 +185,7 @@ class UAVCommander:
             return None, None, None
 
 
+    #Altitude handlers
     def get_rangefinder_alt(self, master):  # tries the downward sensor first
         msg = master.recv_match(type="DISTANCE_SENSOR", blocking=False)
         while msg:
@@ -217,6 +235,23 @@ class UAVCommander:
             time.sleep(0.1)
         raise RuntimeError("No altitude data received from rangefinder or barometer.")
     
+    def get_relative_alt_m(self, master):
+        """Best-effort relative altitude using autopilot telemetry."""
+        msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=False)
+        if msg is not None and hasattr(msg, 'relative_alt'):
+            return float(msg.relative_alt) / 1000.0  # mm -> m
+
+        msg = master.recv_match(type='LOCAL_POSITION_NED', blocking=False)
+        if msg is not None and hasattr(msg, 'z'):
+            return float(-msg.z)
+
+        msg = master.recv_match(type='VFR_HUD', blocking=False)
+        if msg is not None and hasattr(msg, 'alt'):
+            return float(msg.alt)
+
+        return None
+
+    #flight handlers
     def climb_to_target(self, master, target_alt):  # manual climb like mission 4, then settle near target
         self.log_event(f"Climbing to {target_alt:.2f} m...")
 
@@ -259,17 +294,20 @@ class UAVCommander:
 
         start_t = time.time()
         while (time.time() - start_t) < hover_time_s:
-            alt = self.print_altitude(master, prefix="Hover Alt")
+            print(f"Hovering... Time remaining: {hover_time_s - (time.time() - start_t):.1f} s", end="\r", flush=True)
+            alt, source = self.get_altitude_m(master, prefix="Hover Alt")
 
             # in alt hold, keeping throttle near mid-stick tells the autopilot to maintain altitude
             self.set_throttle(master, THROTTLE_HOVER)
 
             # tiny trim if it drifts a lot while still keeping the command near mid-stick
             if alt is not None:
-                if alt < TARGET_ALT - 0.20:
-                    self.set_throttle(master, THROTTLE_HOVER + 40)
-                elif alt > TARGET_ALT + 0.20:
-                    self.set_throttle(master, THROTTLE_HOVER - 40)
+                if alt < TARGET_HEIGHT_M - 0.20:
+                    print(f"Altitude low: {alt:.2f} m, rising")
+                    self.send_guided_velocity(master, vx=0, vy=0, vz=-0.1)  # small upward velocity command
+                elif alt > TARGET_HEIGHT_M + 0.20:
+                    print(f"Altitude high: {alt:.2f} m, descending")
+                    self.send_guided_velocity(master, vx=0, vy=0, vz=0.1)   # small downward velocity command
 
             time.sleep(HOVER_LOOP_DT)
 
@@ -403,11 +441,11 @@ class UAVCommander:
         self.log_event("   UAV MOVEMENT TEST + SAFE LAND MISSION")
         self.log_event("==========================================")
 
-        self.log_event(f"Connecting to Drone: {CONNECTION_STRING}...")
-        if CONNECTION_STRING.startswith("udp:") or CONNECTION_STRING.startswith("tcp:"):
-            master = mavutil.mavlink_connection(CONNECTION_STRING)
+        self.log_event(f"Connecting to Drone: {MAVLINK_CONN}...")
+        if MAVLINK_CONN.startswith("udp:") or MAVLINK_CONN.startswith("tcp:"):
+            master = mavutil.mavlink_connection(MAVLINK_CONN)
         else:
-            master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE)
+            master = mavutil.mavlink_connection(MAVLINK_CONN, baud=BAUD_RATE)
 
         hb = master.wait_heartbeat(timeout=10)
         if not hb:
@@ -419,25 +457,115 @@ class UAVCommander:
 
         return master
     
-    def takeoff(self, master, target_alt=TARGET_ALT):
-        # step 1: start in stabilize like your mission 4 pattern
-        self.change_mode(master, "STABILIZE")
-        self.arm_drone(master)
-        self.change_mode(master, "GUIDED")
+    #Denis' helpers
+    def send_landing_target(self, master,x_b, y_b, z_b):
+        """ Secondary: Broadcasts absolute marker target relative to flow """
+        master.mav.landing_target_send(
+            int(time.time() * 1e6), 0, mavutil.mavlink.MAV_FRAME_BODY_FRD, 0.0, 0.0,
+            abs(z_b), 0.0, 0.0, x_b, y_b, abs(z_b), (1.0, 0.0, 0.0, 0.0), 0, 1
+        )
 
-        isArmed = master.motors_armed()
-        if not isArmed:
-            self.log_event("Failed to arm motors. Check connection and try again.")
+    def send_guided_velocity(self, master,vx, vy, vz):
+        """ Primary Flight: Smooth, safe, velocity vectors directly forcing the PIDs! """
+        master.mav.set_position_target_local_ned_send(
+            0, master.target_system, master.target_component,
+            mavutil.mavlink.MAV_FRAME_BODY_NED,
+            0b0000111111000111,
+            0, 0, 0,
+            vx, vy, vz,
+            0, 0, 0, 0, 0
+        )
+
+    def send_rc_override(self, master, roll=1500, pitch=1500, throttle=1500, yaw=1500):
+        """ Forcefully bypass ArduPilot's 'Not Flying' safety state for desk testing """
+        rc_channel_values = [65535 for _ in range(18)]
+        rc_channel_values[0] = int(roll)
+        rc_channel_values[1] = int(pitch)
+        rc_channel_values[2] = int(throttle)
+        rc_channel_values[3] = int(yaw)
+        master.mav.rc_channels_override_send(master.target_system, master.target_component, *rc_channel_values)
+
+    def release_rc_override(self, master):
+        self.send_rc_override(master, 0, 0, 0, 0)
+
+    def change_mode(self, master, mode_name: str):
+        mode_id = master.mode_mapping().get(mode_name)
+        if mode_id is None:
             return False
+        master.set_mode(mode_id)
+        return True
 
-        # step 2: send takeoff command with desired altitude
+
+    def wait_for_mode(self, master, mode_name: str, timeout: float = 8.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            master.recv_match(type='HEARTBEAT', blocking=True, timeout=1.0)
+            if master.flightmode == mode_name:
+                return True
+        return False
+
+    def arm_with_timeout(self, master, timeout=10):
+        master.arducopter_arm()
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if master.motors_armed():
+                print("Motors Armed!")
+                return True
+            time.sleep(0.1)
+        print("Failed to arm within timeout.")
+        return False
+
+    def arm_and_takeoff(self, master, alt):
+        print("Switching to GUIDED...")
+        if not self.change_mode(master, "GUIDED"):
+            raise RuntimeError("GUIDED mode is not available on this vehicle")
+        if not self.wait_for_mode(master, "GUIDED", timeout=8.0):
+            raise RuntimeError(f"Vehicle never entered GUIDED mode (current: {master.flightmode})")
+
+        print("Arming motors...")
+        isArmed = self.arm_with_timeout(master, timeout=10)
+        if not isArmed:
+            raise RuntimeError("Failed to arm motors, cannot takeoff")
+        
+        print("Armed! Sending takeoff command...")
         master.mav.command_long_send(
             master.target_system, master.target_component,
             mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
-            0, 0, 0, 0, 0, 0, target_alt
+            0, 0, 0, 0, 0, 0, alt
         )
+
+
+def main():
+    print("UAV Takeoff Test Starting...")
+    uav_boss = UAVCommander()
+    
+    master = uav_boss.connect()
+    if master is not None:
+        print(">>> UAV Connection Successful.")
+        uav_boss.wait_for_good_altitude(master, timeout_s=10.0)
+        print(">>> Starting Takeoff Sequence...")
+        uav_boss.arm_and_takeoff(master, alt=TARGET_HEIGHT_M)
+
+        alt, source = uav_boss.get_altitude_m(master)
+        takeoff_start_time = time.time()
+
+        while alt < (TARGET_HEIGHT_M - TAKEOFF_ALT_TOLERANCE_M):
+            alt, source = uav_boss.get_altitude_m(master)
+            takeoff_duration = time.time() - takeoff_start_time
+            print(f"Taking off... Current altitude: {alt:.2f} m, Time elapsed: {takeoff_duration:.1f}/{TAKEOFF_TIMEOUT_S} s", end="\r", flush=True)
+            if(takeoff_duration > TAKEOFF_TIMEOUT_S):
+                print("\n>>> Takeoff timeout reached. Landing for safety.")
+                uav_boss.land_safely(master)
+                return
+            time.sleep(0.1)
+
+        print(f">>> Takeoff complete. Current altitude: {alt:.2f} m")
         
-        currentAlt = master.get_altitude()
-        if currentAlt >= (target_alt * 0.8):
-            self.log_event(f"Takeoff successful, current altitude: {currentAlt:.2f} m")
-            return True
+        uav_boss.hover_in_alt_hold(master, hover_time_s=HOVER_TIME_S)
+        uav_boss.land_safely(master)
+    else:
+        print(">>> UAV Connection Failed.")
+
+
+if __name__ == "__main__":
+    main()
