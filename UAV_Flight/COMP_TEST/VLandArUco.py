@@ -28,15 +28,25 @@ from pymavlink import mavutil
 import time
 import math
 import os
+import sys
 import cv2
 import cv2.aruco as aruco
 import numpy as np
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
 
+# Allow importing v2v_bridge from the sibling Camera Code directory
+_BRIDGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Camera Code")
+if _BRIDGE_DIR not in sys.path:
+    sys.path.insert(0, os.path.normpath(_BRIDGE_DIR))
+import v2v_bridge
+
 # ─── CONNECTION ──────────────────────────────────────────────────────────────────
 CONNECTION_STRING = "/dev/ttyACM0"
 BAUD_RATE         = 57600
+
+# ─── V2V BRIDGE (UAV -> UGV radio link) ─────────────────────────────────────────
+ESP32_BRIDGE_PORT = "/dev/ttyUSB0"   # serial port for the ESP32 radio module
 
 # ─── FLIGHT PARAMS ───────────────────────────────────────────────────────────────
 TARGET_ALT_M       = 0.15              # metres to climb to
@@ -456,6 +466,16 @@ def main():
     estimator = ArucoDistanceEstimator(
         cam.camera_matrix, cam.dist_coeffs, aruco.DICT_6X6_1000)
 
+    # ── V2V BRIDGE INIT ───────────────────────────────────────────────────
+    bridge = None
+    try:
+        bridge = v2v_bridge.V2VBridge(ESP32_BRIDGE_PORT, name="UAV-Bridge")
+        bridge.connect()
+        log_event("V2V bridge connected – UGV commands enabled.")
+    except Exception as e:
+        log_event(f"[WARN] V2V bridge failed to open ({e}) – UGV commands disabled.")
+        bridge = None
+
     try:
         # ── ARM & TAKEOFF (GUIDED) ────────────────────────────────────────
         change_mode(master, "GUIDED")
@@ -532,6 +552,7 @@ def main():
         state = "SEARCHING"    # SEARCHING -> PREC_LOITER -> LANDING -> LANDED
         stable_count = 0
         last_send = 0.0
+        ugv_move_sent = False   # True once CMD_MOVE_FORWARD has been sent to UGV
 
         log_event("ArUco tracking active – looking for marker ID " + str(MARKER_ID))
 
@@ -625,6 +646,14 @@ def main():
                 if stable_count >= PLND_STABLE_FRAMES:
                     log_event("Marker stably detected – engaging centering.")
                     state = "PREC_LOITER"
+                    # Tell the UGV to start moving forward so the UAV can follow it
+                    if not ugv_move_sent and bridge is not None:
+                        try:
+                            bridge.send_command(0, v2v_bridge.CMD_MOVE_FORWARD, 0)
+                            log_event("Sent CMD_MOVE_FORWARD to UGV – following begins.")
+                        except Exception as _be:
+                            log_event(f"[WARN] Bridge send failed: {_be}")
+                        ugv_move_sent = True
 
             elif state == "PREC_LOITER":
                 if stable_count == 0:
@@ -646,6 +675,13 @@ def main():
                     armed = bool(hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
                     if not armed:
                         log_event("TOUCHDOWN AUTO-DISARM – landing complete.")
+                        # Signal UGV: keep driving for post-landing run then stop
+                        if bridge is not None:
+                            try:
+                                bridge.send_command(0, v2v_bridge.CMD_LAND, 0)
+                                log_event("Sent CMD_LAND to UGV – 30 s post-landing drive started.")
+                            except Exception as _be:
+                                log_event(f"[WARN] Bridge send failed: {_be}")
                         state = "LANDED"
                         break
                 if found and target_eb is not None:
@@ -676,6 +712,8 @@ def main():
         clear_rc_override(master)
         send_guided_velocity(master, 0.0, 0.0, 0.0)
         cam.close()
+        if bridge is not None:
+            bridge.stop()
         log_event("Script finished.")
 
 
