@@ -51,6 +51,10 @@ LAND_LATERAL_ERR_M         = 0.20      # Max lateral error before starting desce
 CHASE_KP                   = 0.8       # Proportional gain for velocity tracking
 MAX_CHASE_SPEED            = 0.8       # m/s clamp
 
+# Emergency land switch (RC channel that overrides everything and forces LAND mode)
+EMERGENCY_LAND_CH            = 7        # RC channel number (1-indexed) watched for the kill/land switch
+EMERGENCY_LAND_PWM_THRESHOLD = 1800     # PWM value above which the switch is considered flipped
+
 # ─── CAMERA & ARUCO (from precision_land.py) ────────────────────────────────────
 @dataclass
 class MarkerPose:
@@ -275,6 +279,17 @@ def get_lidar_distance_m(conn):
     return None
 
 
+def check_rc_emergency_switch(conn) -> bool:
+    """Returns True if the designated RC emergency-land channel is above the threshold PWM.
+    ArduPilot sends RC_CHANNELS at ~10 Hz; chan<N>_raw holds the raw PWM for channel N."""
+    msg = conn.recv_match(type='RC_CHANNELS', blocking=False)
+    if msg is not None:
+        ch_val = getattr(msg, f'chan{EMERGENCY_LAND_CH}_raw', None)
+        if ch_val is not None and int(ch_val) > EMERGENCY_LAND_PWM_THRESHOLD:
+            return True
+    return False
+
+
 def arm_and_takeoff(conn, alt):
     print("Switching to GUIDED...")
     if not change_mode(conn, "GUIDED"):
@@ -354,6 +369,12 @@ def main():
                 continue
 
             draw_crosshair(frame)
+
+            # ── RC emergency land switch: overrides everything ─────────────
+            if check_rc_emergency_switch(conn):
+                print(">>> RC EMERGENCY LAND SWITCH DETECTED – commanding LAND mode immediately")
+                change_mode(conn, "LAND")
+                state = "LANDING"
 
             # ── TAKEOFF state (real flight only) ───────────────────────────
             if state == "TAKEOFF":
@@ -523,6 +544,12 @@ def main():
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
+    except KeyboardInterrupt:
+        print(">>> KEYBOARD INTERRUPT – commanding immediate LAND mode")
+        try:
+            change_mode(conn, "LAND")
+        except Exception:
+            pass  # best-effort; cleanup runs regardless
     finally:
         print("Cleaning up...")
         if DESK_TESTING_NO_PROPELLERS:
