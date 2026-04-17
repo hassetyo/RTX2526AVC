@@ -98,6 +98,13 @@ SHOW_DEBUG_WINDOW = True
 
 running = True
 
+LOG_FILE = "ArUcoMovement_official_log.txt"
+
+def log_event(text): # helper to write required logs
+    timestamp = time.strftime("%H:%M:%S")
+    line = f"[{timestamp}] {text}\n"
+    print(line.strip())
+    with open(LOG_FILE, "a") as f: f.write(line)
 
 def clamp(value, low, high):
     return max(low, min(high, value))
@@ -106,7 +113,7 @@ def clamp(value, low, high):
 def handle_sigint(sig, frame):
     global running
     running = False
-    print("\n[INFO] Stopping script...")
+    log_event("\n[INFO] Stopping script...")
 
 
 signal.signal(signal.SIGINT, handle_sigint)
@@ -117,11 +124,11 @@ signal.signal(signal.SIGINT, handle_sigint)
 # ------------------------------------------------------------
 
 def connect_mavlink():
-    print(f"[INFO] Connecting to MAVLink: {MAVLINK_CONNECTION}")
+    log_event(f"[INFO] Connecting to MAVLink: {MAVLINK_CONNECTION}")
     master = mavutil.mavlink_connection(MAVLINK_CONNECTION, baud=MAVLINK_BAUD)
     master.wait_heartbeat()
-    print("[INFO] MAVLink heartbeat received")
-    print(f"[INFO] System ID: {master.target_system}, Component ID: {master.target_component}")
+    log_event("[INFO] MAVLink heartbeat received")
+    log_event(f"[INFO] System ID: {master.target_system}, Component ID: {master.target_component}")
     return master
 
 
@@ -138,18 +145,18 @@ def set_mode(master, mode_name):
         raise RuntimeError(f"Flight mode '{mode_name}' not available")
     mode_id = mapping[mode_name]
     master.set_mode(mode_id)
-    print(f"[INFO] Requested mode: {mode_name}")
+    log_event(f"[INFO] Requested mode: {mode_name}")
 
 
 def arm_vehicle(master):
-    print("[INFO] Arming vehicle...")
+    log_event("[INFO] Arming vehicle...")
     master.arducopter_arm()
     master.motors_armed_wait()
-    print("[INFO] Vehicle armed")
+    log_event("[INFO] Vehicle armed")
 
 
 def disarm_vehicle(master):
-    print("[INFO] Disarming vehicle...")
+    log_event("[INFO] Disarming vehicle...")
     master.arducopter_disarm()
     time.sleep(1.0)
 
@@ -160,7 +167,7 @@ def disable_ugv_avoidance(master):
     Disable ArduPilot proximity/object avoidance so the UAV does not
     try to dodge the UGV when attempting to land on it.
     """
-    print("[INFO] Force-disabling AVOID_ENABLE")
+    log_event("[INFO] Force-disabling AVOID_ENABLE")
     try:
         master.mav.param_set_send(
             master.target_system,
@@ -175,7 +182,7 @@ def disable_ugv_avoidance(master):
 
 
 def takeoff(master, altitude_m):
-    print(f"[INFO] Taking off to {altitude_m:.2f} m")
+    log_event(f"[INFO] Taking off to {altitude_m:.2f} m")
     master.mav.command_long_send(
         master.target_system,
         master.target_component,
@@ -234,9 +241,9 @@ def wait_until_altitude(master, target_alt_m, timeout_s):
     while time.time() - start < timeout_s and running:
         alt = get_relative_altitude_m(master)
         if alt is not None:
-            print(f"[INFO] Current altitude: {alt:.2f} m")
+            log_event(f"[INFO] Current altitude: {alt:.2f} m")
             if alt >= target_alt_m * 0.85:
-                print("[INFO] Takeoff altitude reached")
+                log_event("[INFO] Takeoff altitude reached")
                 return True
         time.sleep(0.2)
     return False
@@ -273,7 +280,7 @@ def open_zed():
 
     dist_coeffs = np.array(left_calib.disto[:5], dtype=np.float32)
 
-    print("[INFO] ZED camera opened")
+    log_event("[INFO] ZED camera opened")
     print("[INFO] Camera matrix:")
     print(camera_matrix)
 
@@ -382,8 +389,8 @@ def main():
     zed, runtime_params, image_mat, camera_matrix, dist_coeffs = open_zed()
     detect_markers = create_aruco_detector()
 
-    print("\n[INFO] Starting autonomous Challenge 1 logic")
-    print("[INFO] Switching to GUIDED, arming, and taking off")
+    log_event("\n[INFO] Starting autonomous Challenge 1 logic")
+    log_event("[INFO] Switching to GUIDED, arming, and taking off")
 
     set_mode(master, "GUIDED")
     time.sleep(1.0)
@@ -394,9 +401,9 @@ def main():
     takeoff(master, CRUISE_ALT_M)
     reached = wait_until_altitude(master, CRUISE_ALT_M, TAKEOFF_TIMEOUT_S)
     if not reached:
-        print("[WARN] Target altitude not confirmed in time; continuing carefully")
+        log_event("[WARN] Target altitude not confirmed in time; continuing carefully")
 
-    print("[INFO] Starting visual tracking and autonomous approach")
+    log_event("[INFO] Starting visual tracking and autonomous approach")
 
     last_marker_seen_time = 0.0
     stable_frames = 0
@@ -445,7 +452,7 @@ def main():
                     follow_start_time = now
                     follow_elapsed = 0.0
                     follow_done = False
-                    print(f"[INFO] Marker ID {MARKER_ID} acquired -> starting {FOLLOW_BEFORE_LAND_S:.1f}s follow phase")
+                    log_event(f"[INFO] Marker ID {MARKER_ID} acquired -> starting {FOLLOW_BEFORE_LAND_S:.1f}s follow phase")
 
             forward_error_m, right_error_m, down_distance_m = camera_pose_to_body_errors(tvec)
             xy_error_m = math.hypot(forward_error_m, right_error_m)
@@ -467,7 +474,7 @@ def main():
                             vz = DESCENT_SPEED_MPS
                         else:
                             if xy_error_m < FINAL_CENTER_TOLERANCE_M:
-                                print("[INFO] Follow complete, low and centered -> switching to LAND")
+                                log_event("[INFO] Follow complete, low and centered -> switching to LAND")
                                 send_body_velocity(master, 0.0, 0.0, 0.0)
                                 set_mode(master, "LAND")
                                 final_land_sent = True
@@ -531,7 +538,7 @@ def main():
 
         time.sleep(0.05)
 
-    print("[INFO] Exiting. Sending zero velocity before shutdown.")
+    log_event("[INFO] Exiting. Sending zero velocity before shutdown.")
     try:
         send_body_velocity(master, 0.0, 0.0, 0.0)
     except Exception:
@@ -541,7 +548,7 @@ def main():
         cv2.destroyAllWindows()
 
     zed.close()
-    print("[INFO] Done")
+    log_event("[INFO] Done")
 
 
 if __name__ == "__main__":
