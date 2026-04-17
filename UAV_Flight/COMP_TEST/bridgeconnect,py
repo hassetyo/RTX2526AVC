@@ -1,17 +1,27 @@
+import time
 import v2v_bridge
 
 def main():
     bridge = v2v_bridge.V2VBridge("/dev/ttyUSB0", baud=115200, name="UAV-Bridge")
     bridge.connect()
 
+    seq = 1
+
     # Send a test message
     test_message = "Hi Cody and Julian"
     bridge.send_message(test_message)
     print(f"Sent message: {test_message}")
 
+    # ARM before sending any motion command (matches ArUcoMovement pattern)
+    bridge.send_command(seq, v2v_bridge.CMD_ARM, 0)
+    print("Sent command: CMD_ARM")
+    seq += 1
+    time.sleep(0.25)
+
     # Send CMD_MOVE_2FT command
-    bridge.send_command(1, v2v_bridge.CMD_MOVE_2FT, 0)
+    bridge.send_command(seq, v2v_bridge.CMD_MOVE_2FT, 0)
     print("Sent command: CMD_MOVE_2FT")
+    seq += 1
 
     bridge.stop()
 
