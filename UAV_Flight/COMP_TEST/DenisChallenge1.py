@@ -441,6 +441,7 @@ def main():
         last_marker_seen_time = 0.0
         stable_frames = 0
         final_land_sent = False
+        running = True
 
         while running:
             frame = get_bgr_frame(zed, runtime_params, image_mat)
