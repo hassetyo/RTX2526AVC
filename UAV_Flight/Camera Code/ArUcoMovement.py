@@ -398,7 +398,7 @@ def draw_distance_overlay(
         )
         y += line_h
 
-LOG_FILE = "Challenge1_official_log.txt"
+LOG_FILE = "ArUcoMovement_official_log.txt"
 
 def log_event(text): # helper to write required logs
     timestamp = time.strftime("%H:%M:%S")
