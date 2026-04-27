@@ -117,8 +117,8 @@ def arm_vehicle_if_enabled(vehicle):
 
 def main():
     try:
-        enter_guided_mode(vehicle)
-        arm_vehicle_if_enabled(vehicle)
+        #enter_guided_mode(vehicle)
+        #arm_vehicle_if_enabled(vehicle)
 
         print("[Waypoint] Waiting for GPS location...")
 
