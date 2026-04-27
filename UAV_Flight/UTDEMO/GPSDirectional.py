@@ -304,9 +304,9 @@ def main():
 
         # ── Example mission ──────────────────────────────────
         fly_north(master, 5)       # 5 m north
-        fly_east(master,  5)       # 5 m east
-        fly_south(master, 5)       # 5 m south (back to start longitude)
-        fly_west(master,  5)       # 5 m west  (back to start)
+        #fly_east(master,  5)       # 5 m east
+        #fly_south(master, 5)       # 5 m south (back to start longitude)
+        #fly_west(master,  5)       # 5 m west  (back to start)
 
         # fly_bearing(master, 45, 7)  # 7 m north-east
         # goto_offset(master, north_m=3, east_m=-2, alt_m=5)  # custom offset + alt
