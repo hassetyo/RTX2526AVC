@@ -1,18 +1,13 @@
-"""
-GPSDirectional – Takeoff, fly in any direction by metres, then land.
-Extends GPSUpDown with waypoint helpers that convert metre offsets to GPS coords.
-"""
-
 from pymavlink import mavutil
 import time
 import math
 
-# ─── CONNECTION ─────────────────────────────────────────────
-CONNECTION_STRING = "udp:127.0.0.1:14551" #"/dev/ttyACM0"
+# CONNECTION 
+CONNECTION_STRING = "/dev/ttyACM0" #"udp:127.0.0.1:14551" 
 BAUD_RATE = 57600
 
-# ─── FLIGHT PARAMS ──────────────────────────────────────────
-TARGET_ALT_M    = 3.0
+# FLIGHT PARAMS 
+TARGET_ALT_M    = 5.0
 HOVER_TIMEOUT_S = 10
 LAND_TIMEOUT_S  = 90
 
@@ -20,11 +15,11 @@ LAND_TIMEOUT_S  = 90
 WP_TOLERANCE_M  = 0.5
 WP_TIMEOUT_S    = 30
 
-# ─── LOGGING ────────────────────────────────────────────────
+# LOGGING 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
-# ─── MAVLINK SETUP ──────────────────────────────────────────
+# MAVLINK SETUP 
 def connect():
     log(f"Connecting to {CONNECTION_STRING}")
     master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE)
@@ -39,7 +34,7 @@ def connect():
     )
     return master
 
-# ─── GPS CHECK ──────────────────────────────────────────────
+# GPS CHECK 
 def wait_for_gps(master, timeout=30):
     log("Waiting for strong GPS fix...")
     start = time.time()
@@ -51,7 +46,7 @@ def wait_for_gps(master, timeout=30):
     log("GPS timeout!")
     return False
 
-# ─── POSITION CHECK ─────────────────────────────────────────
+# POSITION CHECK 
 def wait_for_position(master, timeout=30):
     log("Waiting for position estimate (EKF)...")
     start = time.time()
@@ -63,7 +58,7 @@ def wait_for_position(master, timeout=30):
     log("Position timeout!")
     return False
 
-# ─── MODE CONTROL ───────────────────────────────────────────
+# MODE CONTROL 
 def set_mode(master, mode):
     mapping = master.mode_mapping()
     if mode not in mapping:
@@ -86,7 +81,7 @@ def set_mode(master, mode):
     log(f"Warning: Mode change to {mode} not confirmed")
     return False
 
-# ─── ARMING ─────────────────────────────────────────────────
+# ARMING 
 def arm(master):
     log("Arming...")
     master.arducopter_arm()
@@ -99,7 +94,7 @@ def arm(master):
     log("Failed to arm (check pre-arm errors)")
     return False
 
-# ─── TAKEOFF ────────────────────────────────────────────────
+# TAKEOFF 
 def takeoff(master, alt):
     log(f"Taking off to {alt} m")
     master.mav.command_long_send(
@@ -125,7 +120,7 @@ def takeoff(master, alt):
     log("Takeoff timeout!")
     return False
 
-# ─── LANDING ────────────────────────────────────────────────
+# LANDING 
 def land(master):
     log("Landing...")
     set_mode(master, "LAND")
@@ -140,7 +135,7 @@ def land(master):
     log("Landing timeout — forcing disarm")
     master.arducopter_disarm()
 
-# ─── POSITION HELPERS ───────────────────────────────────────
+# POSITION HELPERS 
 
 def get_current_position(master):
     """
@@ -248,7 +243,7 @@ def goto_offset(master, north_m, east_m, alt_m=None,
     return reached
 
 
-# ─── CARDINAL DIRECTION HELPERS ─────────────────────────────
+# CARDINAL DIRECTION HELPERS 
 
 def fly_north(master, metres, **kw):
     """Fly metres north of the current position."""
@@ -277,7 +272,7 @@ def fly_bearing(master, bearing_deg, distance_m, **kw):
     return goto_offset(master, north_m=north_m, east_m=east_m, **kw)
 
 
-# ─── MAIN ───────────────────────────────────────────────────
+# MAIN 
 def main():
     master = connect()
 
@@ -302,15 +297,17 @@ def main():
             land(master)
             return
 
-        # ── Example mission ──────────────────────────────────
-        fly_north(master, 5)       # 5 m north
-        #fly_east(master,  5)       # 5 m east
-        #fly_south(master, 5)       # 5 m south (back to start longitude)
-        #fly_west(master,  5)       # 5 m west  (back to start)
+        # Mission
+        fly_north(master, 5)       
+        time.sleep(4)
+        fly_west(master,  5)       
+        time.sleep(4)
+        fly_south(master, 5)        
+        time.sleep(4)
+        fly_east(master,  5)       # back to start
 
         # fly_bearing(master, 45, 7)  # 7 m north-east
         # goto_offset(master, north_m=3, east_m=-2, alt_m=5)  # custom offset + alt
-        # ─────────────────────────────────────────────────────
 
         log(f"Hovering for {HOVER_TIMEOUT_S} seconds")
         time.sleep(HOVER_TIMEOUT_S)
