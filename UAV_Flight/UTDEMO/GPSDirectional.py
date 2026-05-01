@@ -1,6 +1,7 @@
 from pymavlink import mavutil
 import time
 import math
+import v2v_bridge
 
 # CONNECTION 
 CONNECTION_STRING = "/dev/ttyACM0" #"udp:127.0.0.1:14551" 
@@ -10,6 +11,11 @@ BAUD_RATE = 57600
 TARGET_ALT_M    = 5.0
 HOVER_TIMEOUT_S = 10
 LAND_TIMEOUT_S  = 90
+
+# BRIDGE PARAMS
+ESP32_BRIDGE_PORT = "/dev/ttyUSB0"
+BRIDGE_BAUD_RATE  = 115200
+BRIDGE_GPS_TIMEOUT_S = 30
 
 # Waypoint acceptance radius (metres) and per-leg timeout (seconds)
 WP_TOLERANCE_M  = 0.5
@@ -271,6 +277,54 @@ def fly_bearing(master, bearing_deg, distance_m, **kw):
     log(f"Flying bearing={bearing_deg}°  dist={distance_m} m")
     return goto_offset(master, north_m=north_m, east_m=east_m, **kw)
 
+#BRIDGE SETUP
+
+def connect_bridge():
+    """Open the V2V bridge to the ESP32 radio."""
+    bridge = v2v_bridge.V2VBridge(ESP32_BRIDGE_PORT, baud=BRIDGE_BAUD_RATE, name="UAV-Bridge")
+    bridge.connect()
+    return bridge
+
+
+def parse_gps_status(msg_str):
+    """
+    Parse a GPS_STATUS message sent by the ground station.
+    Format: GPS_STATUS:lat,lon,alt,heading,fix,sats
+    Returns (lat_deg, lon_deg) or None if parsing fails.
+    """
+    if not msg_str:
+        return None
+    msg = msg_str.strip()
+    if not msg.upper().startswith("GPS_STATUS:"):
+        return None
+    try:
+        payload = msg.split(":", 1)[1]
+        parts = payload.split(",")
+        lat = float(parts[0])
+        lon = float(parts[1])
+        return lat, lon
+    except Exception as e:
+        log(f"GPS_STATUS parse error: {e}")
+        return None
+
+
+def wait_for_ugv_gps(bridge, timeout_s=BRIDGE_GPS_TIMEOUT_S):
+    """
+    Block until a valid GPS_STATUS message arrives from the ground station
+    via the V2V bridge.  Returns (lat_deg, lon_deg) or None on timeout.
+    """
+    log(f"Waiting up to {timeout_s}s for UGV GPS_STATUS from bridge...")
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        msg_str = bridge.get_message(consume=True)
+        coords = parse_gps_status(msg_str)
+        if coords is not None:
+            log(f"UGV GPS received: lat={coords[0]:.7f}, lon={coords[1]:.7f}")
+            return coords
+        time.sleep(0.2)
+    log("Timeout waiting for UGV GPS_STATUS")
+    return None
+
 
 # MAIN 
 def main():
@@ -298,16 +352,26 @@ def main():
             return
 
         # Mission
-        fly_north(master, 5)       
-        time.sleep(4)
-        fly_west(master,  5)       
-        time.sleep(4)
-        fly_south(master, 5)        
-        time.sleep(4)
-        fly_east(master,  5)       # back to start
+        # fly_north(master, 5)       
+        # time.sleep(4)
+        # fly_west(master,  5)       
+        # time.sleep(4)
+        # fly_south(master, 5)        
+        # time.sleep(4)
+        # fly_east(master,  5)       # back to start
 
         # fly_bearing(master, 45, 7)  # 7 m north-east
         # goto_offset(master, north_m=3, east_m=-2, alt_m=5)  # custom offset + alt
+        bridge = connect_bridge()
+
+        ugv_coords = wait_for_ugv_gps(bridge)
+        if ugv_coords is not None:
+            target_lat, target_lon = ugv_coords
+            log(f"Flying to UGV location: ({target_lat:.7f}, {target_lon:.7f})")
+            send_waypoint(master, target_lat, target_lon, TARGET_ALT_M)
+            wait_until_reached(master, target_lat, target_lon)
+        else:
+            log("No UGV GPS received — hovering in place")
 
         log(f"Hovering for {HOVER_TIMEOUT_S} seconds")
         time.sleep(HOVER_TIMEOUT_S)
@@ -317,6 +381,12 @@ def main():
     except KeyboardInterrupt:
         log("Emergency interrupt — landing")
         land(master)
+    finally:
+        if bridge is not None:
+            try:
+                bridge.stop()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
