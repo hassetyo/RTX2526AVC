@@ -9,7 +9,9 @@ import cv2.aruco as aruco
 import numpy as np
 
 showDisplay = True
+singleMarkerTest = False
 
+#-------------- Camera Helpers ---------------------
 @dataclass
 class MarkerPose:
     marker_id: int
@@ -178,7 +180,7 @@ class CameraInterface:
             self.cap.release()
         cv2.destroyAllWindows()
 
-
+#-------------- ArUco Detection Helpers ---------------------
 class ArucoDistanceEstimator:
     def __init__(
         self,
@@ -588,6 +590,11 @@ def parse_args():
 
 def main():
     print("Starting Stationary Camera Test...")
+
+    if singleMarkerTest:
+        print("\nDetection Mode Set to Single Marker\n")
+    else:
+        print("\nDetection Mode Set to 2 Markers\n")
     
     #Initialize the camera settings
     args = parse_args()
@@ -604,6 +611,8 @@ def main():
     if not args.use_zed:
         cam.load_standard_calibration(args.calibration)
 
+    #Calibrate the ArUco detection
+
     estimator = ArucoDistanceEstimator(
         camera_matrix=cam.camera_matrix,
         dist_coeffs=cam.dist_coeffs,
@@ -613,23 +622,29 @@ def main():
 
     try:
         while True:
+            #Attempt to get eh camera frame
             frame = cam.get_frame()
             if frame is None:
                 print("Failed to read frame.")
                 continue
 
+            #check if any markers are in frame
             poses = estimator.detect_markers(frame)
-            display = frame.copy()
 
+            #Show highlights and crosshairs on the display window
+            display = frame.copy()
             draw_crosshair(display)
             estimator.draw_markers(display, poses)
 
+            #If were doing multiple markers, make sure there are 2 in frame
             pair = pick_two_markers(poses, args.ugv_marker_id, args.dest_marker_id)
-            if pair is not None:
+            if pair is not None and not singleMarkerTest:
                 ugv_pose, dest_pose = pair
 
+                #Show the distance between the UGV and the Destination
                 draw_distance_overlay(display, ugv_pose, dest_pose)
 
+                #Figure out which way the UGV is facing
                 forward_dir = get_marker_forward_direction_px(
                     ugv_pose,
                     cam.camera_matrix,
@@ -637,6 +652,8 @@ def main():
                     args.marker_size,
                     args.ugv_forward_axis,
                 )
+
+                #Get the direction the UGV need to go to get to the Destination
                 target_dir = np.array(
                     [
                         dest_pose.center_px[0] - ugv_pose.center_px[0],
@@ -644,7 +661,11 @@ def main():
                     ],
                     dtype=np.float64,
                 )
+
+                #Calculate the degrees the UGV need to turn to face the Destination
                 heading_error_deg = signed_angle_deg(forward_dir if forward_dir is not None else target_dir, target_dir)
+                
+                #Calculate the distance the UGV need to drive to reach the Destination
                 dist_m = float(np.linalg.norm(dest_pose.tvec.reshape(3) - ugv_pose.tvec.reshape(3)))
 
                 draw_nav_overlay(
@@ -658,6 +679,9 @@ def main():
                     args.marker_size,
                     args.ugv_forward_axis,
                 )
+            #Else, if we are doing 1 marker, make sure its in frame
+            elif singleMarkerTest:
+                ''' fill this out '''
             else:
                 cv2.putText(
                     display,
