@@ -6,13 +6,21 @@ import v2v_bridge
 
 # ==========================================
 # GPS GROUND STATION
-# Behavior:
-#   1) arm and enter GUIDED at startup
-#   2) receive bridge commands from UAV
-#   3) drive forward a requested distance in meters using GPS
-#   4) drive to requested GPS coordinates
-#   5) constantly send UGV GPS coordinates through the bridge
-#   6) stop cleanly
+#
+# Repeat-safe command behavior:
+#   UAV can repeatedly send:
+#       GPS_CMD:12,32.985123,-96.750456
+#       FORWARD_CMD:13,5.0
+#
+#   UGV responses:
+#       CMD_STARTED:12
+#       CMD_ACTIVE:12
+#       CMD_DONE:12
+#       CMD_FAILED:12
+#       CMD_BUSY:12
+#
+# GPS status broadcast:
+#       GPS_STATUS:lat,lon,alt,heading,fix,sats
 # ==========================================
 
 # ----------------------------
@@ -40,8 +48,12 @@ GPS_MIN_SATS = 6
 TELEM_SEND_HZ = 5
 GPS_SEND_HZ = 2
 
+# Prevent completed command list from growing forever
+MAX_COMPLETED_COMMANDS = 100
+
+
 print("==========================================")
-print("   UGV GROUND STATION - GPS READY")
+print("   UGV GROUND STATION - GPS COMMAND READY")
 print("==========================================")
 print(f"[Ground] Connecting to UGV at {UGV_CONTROL_PORT}...")
 
@@ -300,6 +312,7 @@ def goto_gps(vehicle, bridge, target_lat, target_lon, speed_mps=SPEED_MPS):
         return False
 
     current = get_current_location(vehicle)
+
     target = LocationGlobalRelative(
         target_lat,
         target_lon,
@@ -369,21 +382,33 @@ def drive_forward_gps(vehicle, bridge, distance_m, speed_mps=SPEED_MPS):
     return goto_gps(vehicle, bridge, target.lat, target.lon, speed_mps)
 
 
+def remember_completed_command(command_state, command_id):
+    command_state["completed"].add(command_id)
+    command_state["completed_order"].append(command_id)
+
+    while len(command_state["completed_order"]) > MAX_COMPLETED_COMMANDS:
+        old_id = command_state["completed_order"].pop(0)
+        command_state["completed"].discard(old_id)
+
+
 def parse_bridge_message(msg_str):
     """
-    Supported message formats:
+    Supported repeat-safe formats:
 
-    FORWARD:5
-        Drive forward 5 meters using current GPS heading.
+    GPS_CMD:12,32.985123,-96.750456
+        command_id = 12
+        target latitude = 32.985123
+        target longitude = -96.750456
 
-    GPS:32.985123,-96.750456
-        Drive to a latitude/longitude GPS coordinate.
+    FORWARD_CMD:13,5.0
+        command_id = 13
+        drive forward 5.0 meters using current GPS heading
 
-    GOTO_GPS:32.985123,-96.750456
-        Same as GPS.
-
-    GOTO:32.985123,-96.750456
-        Treated as GPS coordinate command in this GPS version.
+    Also supports old one-shot formats:
+        GPS:32.985123,-96.750456
+        GOTO_GPS:32.985123,-96.750456
+        GOTO:32.985123,-96.750456
+        FORWARD:5.0
     """
 
     if not msg_str:
@@ -392,24 +417,34 @@ def parse_bridge_message(msg_str):
     msg = msg_str.strip()
 
     try:
-        if msg.upper().startswith("FORWARD:"):
-            distance_str = msg.split(":", 1)[1].strip()
-            return ("FORWARD", float(distance_str))
+        if msg.upper().startswith("GPS_CMD:"):
+            payload = msg.split(":", 1)[1].strip()
+            cmd_id_str, lat_str, lon_str = payload.split(",")
+            return ("GPS", int(cmd_id_str), float(lat_str), float(lon_str), True)
+
+        if msg.upper().startswith("FORWARD_CMD:"):
+            payload = msg.split(":", 1)[1].strip()
+            cmd_id_str, distance_str = payload.split(",")
+            return ("FORWARD", int(cmd_id_str), float(distance_str), True)
 
         if msg.upper().startswith("GPS:"):
             payload = msg.split(":", 1)[1].strip()
             lat_str, lon_str = payload.split(",")
-            return ("GPS", float(lat_str.strip()), float(lon_str.strip()))
+            return ("GPS", None, float(lat_str), float(lon_str), False)
 
         if msg.upper().startswith("GOTO_GPS:"):
             payload = msg.split(":", 1)[1].strip()
             lat_str, lon_str = payload.split(",")
-            return ("GPS", float(lat_str.strip()), float(lon_str.strip()))
+            return ("GPS", None, float(lat_str), float(lon_str), False)
 
         if msg.upper().startswith("GOTO:"):
             payload = msg.split(":", 1)[1].strip()
             lat_str, lon_str = payload.split(",")
-            return ("GPS", float(lat_str.strip()), float(lon_str.strip()))
+            return ("GPS", None, float(lat_str), float(lon_str), False)
+
+        if msg.upper().startswith("FORWARD:"):
+            distance_str = msg.split(":", 1)[1].strip()
+            return ("FORWARD", None, float(distance_str), False)
 
     except Exception as e:
         print(f"[Ground] Failed to parse message '{msg_str}': {e}")
@@ -418,24 +453,84 @@ def parse_bridge_message(msg_str):
     return None
 
 
-def execute_parsed_message(vehicle, bridge, parsed):
+def execute_parsed_message(vehicle, bridge, parsed, command_state):
     if parsed is None:
         return
 
     command_type = parsed[0]
+    command_id = parsed[1]
+    is_repeat_safe = parsed[-1]
 
-    if command_type == "FORWARD":
-        distance_m = parsed[1]
-        drive_forward_gps(vehicle, bridge, distance_m, SPEED_MPS)
+    # Old one-shot commands still execute immediately.
+    if not is_repeat_safe:
+        if command_type == "FORWARD":
+            distance_m = parsed[2]
+            drive_forward_gps(vehicle, bridge, distance_m, SPEED_MPS)
 
-    elif command_type == "GPS":
-        lat = parsed[1]
-        lon = parsed[2]
-        goto_gps(vehicle, bridge, lat, lon, SPEED_MPS)
+        elif command_type == "GPS":
+            lat = parsed[2]
+            lon = parsed[3]
+            goto_gps(vehicle, bridge, lat, lon, SPEED_MPS)
+
+        return
+
+    # Repeat-safe command handling.
+    if command_id in command_state["completed"]:
+        print(f"[Ground] Command {command_id} already completed. Re-sending CMD_DONE.")
+        bridge.send_message(f"CMD_DONE:{command_id}")
+        return
+
+    if command_state["active"] == command_id:
+        print(f"[Ground] Command {command_id} already active.")
+        bridge.send_message(f"CMD_ACTIVE:{command_id}")
+        return
+
+    if command_state["active"] is not None:
+        active_id = command_state["active"]
+        print(f"[Ground] Busy with command {active_id}. Ignoring command {command_id}.")
+        bridge.send_message(f"CMD_BUSY:{active_id}")
+        return
+
+    command_state["active"] = command_id
+    bridge.send_message(f"CMD_STARTED:{command_id}")
+
+    success = False
+
+    try:
+        if command_type == "FORWARD":
+            distance_m = parsed[2]
+            print(f"[Ground] Starting repeat-safe FORWARD command {command_id}: {distance_m:.2f} m")
+            success = drive_forward_gps(vehicle, bridge, distance_m, SPEED_MPS)
+
+        elif command_type == "GPS":
+            lat = parsed[2]
+            lon = parsed[3]
+            print(f"[Ground] Starting repeat-safe GPS command {command_id}: {lat}, {lon}")
+            success = goto_gps(vehicle, bridge, lat, lon, SPEED_MPS)
+
+    except Exception as e:
+        print(f"[Ground] Command {command_id} failed with error: {e}")
+        success = False
+
+    if success:
+        remember_completed_command(command_state, command_id)
+        bridge.send_message(f"CMD_DONE:{command_id}")
+        print(f"[Ground] CMD_DONE:{command_id}")
+    else:
+        bridge.send_message(f"CMD_FAILED:{command_id}")
+        print(f"[Ground] CMD_FAILED:{command_id}")
+
+    command_state["active"] = None
 
 
 def main():
     bridge = None
+
+    command_state = {
+        "active": None,
+        "completed": set(),
+        "completed_order": [],
+    }
 
     try:
         if not wait_for_gps(vehicle, timeout_s=60):
@@ -469,7 +564,7 @@ def main():
                 parsed = parse_bridge_message(msg_str)
 
                 if parsed is not None:
-                    execute_parsed_message(vehicle, bridge, parsed)
+                    execute_parsed_message(vehicle, bridge, parsed, command_state)
                 else:
                     print("[Ground] Message ignored. Unknown format.")
 
@@ -483,6 +578,7 @@ def main():
                     print("!!! [ABORT] EMERGENCY DISARM !!!")
                     send_stop(vehicle)
                     vehicle.armed = False
+                    command_state["active"] = None
                     continue
 
                 if cmdVal == v2v_bridge.CMD_ARM:
@@ -491,6 +587,7 @@ def main():
                 elif cmdVal == v2v_bridge.CMD_DISARM:
                     send_stop(vehicle)
                     vehicle.armed = False
+                    command_state["active"] = None
 
                 elif cmdVal == v2v_bridge.CMD_MOVE_FORWARD:
                     print(f"[Ground] >>> GPS MOVE FORWARD {MOVE_FORWARD_10FT_M:.3f} m")
@@ -503,6 +600,7 @@ def main():
                 elif cmdVal == v2v_bridge.CMD_STOP:
                     print("[Ground] >>> STOPPED")
                     send_stop(vehicle)
+                    command_state["active"] = None
 
                 else:
                     print("[Ground] Command ignored in GPS mode.")
