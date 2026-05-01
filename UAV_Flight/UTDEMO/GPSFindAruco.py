@@ -794,69 +794,66 @@ def get_dictionary_by_name(name: str) -> int:
     return getattr(aruco, name)
 
 def calculate_marker_gps(drone_lat, drone_lon, drone_yaw_deg, marker_pose: MarkerPose):
-    """
-    Calculates marker GPS by rotating the camera's translation vector (tvec) 
-    by the drone's yaw and adding it to the drone's GPS coordinates.
-    """
-    # 1. Get the relative position (in meters) from the marker pose
-    # Note: ArUco tvec is usually [x: right, y: down, z: forward]
-    # We map this to [North, East] based on drone heading
+    # With a DOWNWARD camera:
+    # x_m is still Right/Left
+    # y_m is now Forward/Backward (relative to camera orientation)
     x_m = marker_pose.tvec[0]
-    z_m = marker_pose.tvec[2]
+    y_m = marker_pose.tvec[1] 
 
-    # 2. Rotate the relative meters by the drone's current yaw (heading)
     yaw_rad = math.radians(drone_yaw_deg)
-    # Simple 2D rotation matrix logic
-    north_offset = z_m * math.cos(yaw_rad) - x_m * math.sin(yaw_rad)
-    east_offset = z_m * math.sin(yaw_rad) + x_m * math.cos(yaw_rad)
+    
+    # Rotate offsets based on drone heading
+    # Note: We use y_m here instead of z_m because the camera is tilted 90 degrees down
+    north_offset = -y_m * math.cos(yaw_rad) - x_m * math.sin(yaw_rad)
+    east_offset = -y_m * math.sin(yaw_rad) + x_m * math.cos(yaw_rad)
 
-    # 3. Convert meter offsets to Latitude/Longitude degrees
-    # Earth's radius is roughly 6,378,137 meters
     lat_offset = north_offset / 111111.0
     lon_offset = east_offset / (111111.0 * math.cos(math.radians(drone_lat)))
 
-    marker_lat = drone_lat + lat_offset
-    marker_lon = drone_lon + lon_offset
-    
-    return marker_lat, marker_lon
+    return drone_lat + lat_offset, drone_lon + lon_offset
 
 #-------------- Not sure if this is needed, will check later ---------------------
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description=(
-            "Measure ArUco marker distance and command the ground vehicle marker to drive toward the destination marker."
-        )
-    )
-    parser.add_argument("--use-zed", action="store_true", help="Use Stereolabs ZED / ZED X camera.")
-    parser.add_argument("--camera-index", type=int, default=0, help="Standard camera index for laptop/USB webcam.")
-    parser.add_argument("--calibration", type=str, default=None, help="YAML calibration file for standard camera with nodes K and D.")
-    parser.add_argument("--marker-size", type=float, default=0.254, help="Marker size in meters. Example: 0.254 for 10 inches.")
-    #parser.add_argument("--ugv-marker-id", type=int, default=5, help="ArUco ID attached to the ground vehicle.")
-    parser.add_argument("--dest-marker-id", type=int, default=0, help="Destination ArUco ID.")
-    parser.add_argument("--dict", type=str, default="DICT_6X6_1000", help="ArUco dictionary name.")
-    parser.add_argument("--width", type=int, default=1280, help="Standard camera width.")
-    parser.add_argument("--height", type=int, default=720, help="Standard camera height.")
-    parser.add_argument("--fps", type=int, default=30, help="Camera FPS.")
-
-    parser.add_argument("--bridge-port", type=str, default="/dev/ttyUSB0", help="Local ESP32 bridge serial port used to send commands.")
-    parser.add_argument("--bridge-baud", type=int, default=115200, help="ESP32 bridge baud rate.")
-    
-    #Controlling the UGV
-    '''
-    parser.add_argument("--turn-threshold-deg", type=float, default=12.0, help="Heading error magnitude required before issuing turn commands.")
-    parser.add_argument("--stop-distance-m", type=float, default=0.28, help="Distance at which the UGV is considered to have reached the destination.")
-    parser.add_argument("--step-min-m", type=float, default=0.20, help="Minimum forward body step to command.")
-    parser.add_argument("--step-max-m", type=float, default=0.60, help="Maximum forward body step to command.")
-    parser.add_argument("--drive-speed-mps", type=float, default=1.5, help="Expected ground-station forward speed used only for cooldown timing.")
-    parser.add_argument("--marker-timeout-sec", type=float, default=0.75, help="Stop the UGV if markers disappear longer than this timeout.")
-    parser.add_argument(
-        "--ugv-forward-axis",
-        choices=["+x", "-x", "+y", "-y"],
-        default="+y",
-        help="Which marker local axis points in the UGV forward direction.",
-    )
-    '''
+    parser = argparse.ArgumentParser(description="ArUco Marker GPS Detection")
+    parser.add_argument("--use-zed", action="store_true", help="Use ZED camera.")
+    parser.add_argument("--camera-index", type=int, default=0)
+    parser.add_argument("--calibration", type=str, default=None)
+    parser.add_argument("--marker-size", type=float, default=0.254)
+    parser.add_argument("--dict", type=str, default="DICT_6X6_1000")
+    # Only keep the destination ID if you're looking for one specific marker, for now i am not
+    #parser.add_argument("--target-id", type=int, default=0, help="The ID you want to find")
     return parser.parse_args()
+
+def request_message_streams(master):  # asks the flight controller for the messages we care about
+    try:
+        master.mav.request_data_stream_send(
+            master.target_system,
+            master.target_component,
+            mavutil.mavlink.MAV_DATA_STREAM_ALL,
+            10,
+            1,
+        )
+    except Exception:
+        pass
+
+    def set_interval(msg_id, hz):
+        try:
+            us = int(1e6 / hz)
+            master.mav.command_long_send(
+                master.target_system,
+                master.target_component,
+                mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                0,
+                msg_id,
+                us,
+                0, 0, 0, 0, 0,
+            )
+        except Exception:
+            pass
+
+    set_interval(mavutil.mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR, 15)
+    set_interval(mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, 10)
+    set_interval(mavutil.mavlink.MAVLINK_MSG_ID_HEARTBEAT, 5)
 
 def connectDrone():
         print(f"Connecting to Drone: {CONNECTION_STRING}...")
@@ -871,6 +868,7 @@ def connectDrone():
             return None
         print("Drone Heartbeat OK.")
 
+        request_message_streams(master)
 
         return master
 
@@ -925,100 +923,34 @@ def main():
         print("Starting Camera Code")
 
         while True:
-            #Attempt to get the camera frame
             frame = cam.get_frame()
             if frame is None:
-                print("Failed to read frame.")
                 continue
 
-            #check if any markers are in frame
             poses = estimator.detect_markers(frame)
-
-            #Show highlights and crosshairs on the display window
             display = frame.copy()
             draw_crosshair(display)
             estimator.draw_markers(display, poses)
 
-            #If were doing multiple markers, make sure there are 2 in frame
-            pair = pick_two_markers(poses, args.ugv_marker_id, args.dest_marker_id)
-            if pair is not None and not singleMarkerTest:
-                ugv_pose, dest_pose = pair
-
-                #Show the distance between the UGV and the Destination
-                draw_distance_overlay(display, ugv_pose, dest_pose)
-
-                #Figure out which way the UGV is facing
-                forward_dir = get_marker_forward_direction_px(
-                    ugv_pose,
-                    cam.camera_matrix,
-                    cam.dist_coeffs,
-                    args.marker_size,
-                    args.ugv_forward_axis,
-                )
-
-                #Get the direction the UGV need to go to get to the Destination
-                target_dir = np.array(
-                    [
-                        dest_pose.center_px[0] - ugv_pose.center_px[0],
-                        dest_pose.center_px[1] - ugv_pose.center_px[1],
-                    ],
-                    dtype=np.float64,
-                )
-
-                #Calculate the degrees the UGV need to turn to face the Destination
-                heading_error_deg = signed_angle_deg(forward_dir if forward_dir is not None else target_dir, target_dir)
+            # calculate GPS for every marker detected
+            if len(poses) > 0:
+                droneLat, droneLon, droneAlt = get_current_position(master)
                 
-                #Calculate the distance the UGV need to drive to reach the Destination
-                dist_m = float(np.linalg.norm(dest_pose.tvec.reshape(3) - ugv_pose.tvec.reshape(3)))
+                # Get Drone Heading (Yaw) from MAVLink
+                msg = master.recv_match(type='ATTITUDE', blocking=True, timeout=1)
+                droneYaw = math.degrees(msg.yaw) if msg else 0.0
 
-                draw_nav_overlay(
-                    display,
-                    ugv_pose,
-                    dest_pose,
-                    heading_error_deg,
-                    args.stop_distance_m,
-                    cam.camera_matrix,
-                    cam.dist_coeffs,
-                    args.marker_size,
-                    args.ugv_forward_axis,
-                )
-            # Else, if we are doing 1 marker, make sure its in frame
-            elif singleMarkerTest and len(poses) > 0:
-                # 1. Get real telemetry from the drone
-                # current_lat, current_lon, current_alt from your existing helper
-                drone_lat, drone_lon, _ = get_current_position(master)
-                
-                # Get heading (yaw) from VFR_HUD message for rotation math
-                hud_msg = master.recv_match(type='VFR_HUD', blocking=True, timeout=1)
-                drone_yaw = hud_msg.heading if hud_msg else 0.0
-
-                for marker_id, pose in poses.items():
-                    # 2. Calculate the GPS using your existing calculate_marker_gps function
-                    m_lat, m_lon = calculate_marker_gps(drone_lat, drone_lon, drone_yaw, pose)
+                for m_id, m_pose in poses.items():
+                    # Use the function we created earlier
+                    markerLat, markerLon = calculate_marker_gps(droneLat, droneLon, droneYaw, m_pose)
                     
-                    # 3. Prepare the text overlay
-                    gps_text = f"ID {marker_id} GPS: {m_lat:.6f}, {m_lon:.6f}"
-                    
-                    # 4. Calculate top-right position
-                    text_size = cv2.getTextSize(gps_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-                    text_x = display.shape[1] - text_size[0] - 20
-                    text_y = 30 + (list(poses.keys()).index(marker_id) * 25) 
-                    
-                    # 5. Draw on display
-                    cv2.putText(display, gps_text, (text_x, text_y), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-                
+                    # Display the coordinates
+                    gps_text = f"ID {m_id} GPS: {markerLat:.6f}, {markerLon:.6f}"
+                    cv2.putText(display, gps_text, (20, 30 + (m_id * 30)), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             else:
-                cv2.putText(
-                    display,
-                    f"Need markers {args.ugv_marker_id} and {args.dest_marker_id}",
-                    (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.9,
-                    (0, 0, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
+                cv2.putText(display, "Searching for markers...", (20, 40), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
             if(showDisplay):
                 cv2.imshow("Camera Test", display)
@@ -1029,12 +961,26 @@ def main():
                 elif key == ord("s"):
                     cv2.imwrite("Camera_Test_screenshot.png", display)
                     print("Saved: Camera_Test_screenshot.png")
+    
+    #Handle errors
+    except Exception as e:
+        print(f"Error: {e}")
 
+    #Handle a Ctrl+C exit
     except KeyboardInterrupt:
         print("Exiting Camera Test") 
         cam.close()
         land(master)
         return 
+    
+    #Final clean up
+    finally:
+        print("Cleaning up...")
+        cam.close()
+        if 'master' in locals():
+            land(master)
+
+
 
 
 if __name__ == "__main__":
