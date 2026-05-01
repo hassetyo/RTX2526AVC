@@ -2,78 +2,88 @@ import cv2
 import depthai as dai
 import time
 
-# ==========================================
-# OAK-D-Lite Camera Viewer for Raspberry Pi
-# UGV
-#
-# This script:
-#   1. Opens the OAK-D-Lite camera
-#   2. Shows the RGB camera feed
-#   3. Press q to quit
-# ==========================================
+PREVIEW_WIDTH = 640
+PREVIEW_HEIGHT = 480
+CAMERA_FPS = 30
 
 
 def create_pipeline():
     pipeline = dai.Pipeline()
 
-    # Create RGB camera node
     cam_rgb = pipeline.create(dai.node.ColorCamera)
-    cam_rgb.setPreviewSize(640, 480)
-    cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+    cam_rgb.setPreviewSize(PREVIEW_WIDTH, PREVIEW_HEIGHT)
+    cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_720_P)
     cam_rgb.setInterleaved(False)
     cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
-    cam_rgb.setFps(30)
+    cam_rgb.setFps(CAMERA_FPS)
 
-    # Create output stream
     xout_rgb = pipeline.create(dai.node.XLinkOut)
     xout_rgb.setStreamName("rgb")
 
-    # Link camera preview to output
     cam_rgb.preview.link(xout_rgb.input)
 
     return pipeline
 
 
 def main():
-    print("==========================================")
-    print("        OAK-D-Lite Camera Viewer")
-    print("==========================================")
     print("[INFO] Starting OAK-D-Lite camera...")
-    print("[INFO] Press 'q' to quit.")
+    print("[INFO] Press q to quit.")
 
     pipeline = create_pipeline()
+
+    frame_count = 0
+    start_time = time.time()
+    fps = 0.0
 
     try:
         with dai.Device(pipeline) as device:
             print("[INFO] OAK-D-Lite connected successfully.")
+            print("[INFO] USB speed:", device.getUsbSpeed())
 
             rgb_queue = device.getOutputQueue(
                 name="rgb",
-                maxSize=4,
+                maxSize=1,
                 blocking=False
             )
 
             while True:
-                rgb_frame = rgb_queue.get()
-                frame = rgb_frame.getCvFrame()
+                packet = rgb_queue.tryGet()
+
+                if packet is None:
+                    continue
+
+                frame = packet.getCvFrame()
+
+                frame_count += 1
+                now = time.time()
+
+                if now - start_time >= 1.0:
+                    fps = frame_count / (now - start_time)
+                    frame_count = 0
+                    start_time = now
+                    print(f"[INFO] FPS: {fps:.2f}")
+
+                cv2.putText(
+                    frame,
+                    f"FPS: {fps:.2f}",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0, 255, 0),
+                    2
+                )
 
                 cv2.imshow("OAK-D-Lite RGB Camera", frame)
 
                 if cv2.waitKey(1) & 0xFF == ord("q"):
-                    print("[INFO] Quit key pressed.")
                     break
+
+    except KeyboardInterrupt:
+        print("[INFO] Stopped by user.")
 
     except RuntimeError as e:
         print("[ERROR] Could not connect to OAK-D-Lite.")
-        print("[ERROR]", e)
-        print()
-        print("Try these checks:")
-        print("1. Make sure the OAK-D-Lite is plugged into the Raspberry Pi.")
-        print("2. Try a different USB-C cable.")
-        print("3. Make sure depthai is installed:")
-        print("   pip install depthai opencv-python")
-        print("4. Run:")
-        print("   python -c \"import depthai as dai; print(dai.Device.getAllAvailableDevices())\"")
+        print(e)
 
     finally:
         cv2.destroyAllWindows()
