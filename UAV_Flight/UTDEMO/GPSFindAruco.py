@@ -1007,9 +1007,6 @@ def main():
                     # 5. Draw on display
                     cv2.putText(display, gps_text, (text_x, text_y), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-                    
-                    # Optional: Log to console
-                    # log(f"Detected Marker {marker_id} at {m_lat:.6f}, {m_lon:.6f}")
                 
             else:
                 cv2.putText(
@@ -1036,5 +1033,9 @@ def main():
     except KeyboardInterrupt:
         print("Exiting Camera Test") 
         cam.close()
+        land(master)
         return 
 
+
+if __name__ == "__main__":
+    main()
