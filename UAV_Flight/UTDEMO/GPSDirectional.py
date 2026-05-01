@@ -1,7 +1,7 @@
 from pymavlink import mavutil
 import time
 import math
-import v2v_bridge
+import GPSv2v_bridge as v2v_bridge
 
 # CONNECTION 
 CONNECTION_STRING = "/dev/ttyACM0" #"udp:127.0.0.1:14551" 
@@ -16,6 +16,9 @@ LAND_TIMEOUT_S  = 90
 ESP32_BRIDGE_PORT = "/dev/ttyUSB0"
 BRIDGE_BAUD_RATE  = 115200
 BRIDGE_GPS_TIMEOUT_S = 30
+UGV_COMMAND_TIMEOUT_S = 120
+UGV_MOVE_FORWARD_M = 5.0
+UGV_MOVE_RIGHT_M = 5.0
 
 # Waypoint acceptance radius (metres) and per-leg timeout (seconds)
 WP_TOLERANCE_M  = 0.5
@@ -173,6 +176,14 @@ def offset_latlon(lat_deg, lon_deg, north_m, east_m):
     return lat_deg + d_lat, lon_deg + d_lon
 
 
+def offset_by_bearing(lat_deg, lon_deg, bearing_deg, distance_m):
+    """Compute a new GPS coordinate distance_m metres along bearing_deg."""
+    rad = math.radians(bearing_deg)
+    north_m = distance_m * math.cos(rad)
+    east_m = distance_m * math.sin(rad)
+    return offset_latlon(lat_deg, lon_deg, north_m, east_m)
+
+
 def haversine_distance(lat1, lon1, lat2, lon2):
     """Return the great-circle distance in metres between two lat/lon points."""
     R = 6_371_000  # Earth radius in metres
@@ -286,49 +297,67 @@ def connect_bridge():
     return bridge
 
 
-def parse_gps_status(msg_str):
-    """
-    Parse a GPS_STATUS message sent by the ground station.
-    Format: GPS_STATUS:lat,lon,alt,heading,fix,sats
-    Returns (lat_deg, lon_deg) or None if parsing fails.
-    """
-    if not msg_str:
-        return None
-    msg = msg_str.strip()
-    if not msg.upper().startswith("GPS_STATUS:"):
-        return None
-    try:
-        payload = msg.split(":", 1)[1]
-        parts = payload.split(",")
-        lat = float(parts[0])
-        lon = float(parts[1])
-        return lat, lon
-    except Exception as e:
-        log(f"GPS_STATUS parse error: {e}")
-        return None
-
-
-def wait_for_ugv_gps(bridge, timeout_s=BRIDGE_GPS_TIMEOUT_S):
-    """
-    Block until a valid GPS_STATUS message arrives from the ground station
-    via the V2V bridge.  Returns (lat_deg, lon_deg) or None on timeout.
-    """
+def wait_for_ugv_status(bridge, timeout_s=BRIDGE_GPS_TIMEOUT_S):
+    """Wait for an available GPS_STATUS update from the UGV."""
     log(f"Waiting up to {timeout_s}s for UGV GPS_STATUS from bridge...")
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        msg_str = bridge.get_message(consume=True)
-        coords = parse_gps_status(msg_str)
-        if coords is not None:
-            log(f"UGV GPS received: lat={coords[0]:.7f}, lon={coords[1]:.7f}")
-            return coords
-        time.sleep(0.2)
+        status = bridge.wait_for_gps_status(timeout_s=0.5)
+        if status and status.get("available") and status.get("lat") is not None and status.get("lon") is not None:
+            log(
+                f"UGV GPS received: lat={status['lat']:.7f}, lon={status['lon']:.7f}, "
+                f"heading={status['heading']:.1f}"
+            )
+            return status
     log("Timeout waiting for UGV GPS_STATUS")
     return None
+
+
+def move_ugv_forward_and_right(bridge):
+    """Send the UGV forward 5 m, then 5 m to its right, and return final GPS status."""
+    status = wait_for_ugv_status(bridge)
+    if status is None:
+        return None
+
+    log(f"Commanding UGV forward {UGV_MOVE_FORWARD_M:.1f} m")
+    if not bridge.send_forward_command_until_done(
+        UGV_MOVE_FORWARD_M,
+        timeout_s=UGV_COMMAND_TIMEOUT_S,
+    ):
+        log("UGV forward command failed or timed out")
+        return None
+
+    status = wait_for_ugv_status(bridge)
+    if status is None:
+        return None
+
+    right_bearing_deg = (status["heading"] + 90.0) % 360.0
+    target_lat, target_lon = offset_by_bearing(
+        status["lat"],
+        status["lon"],
+        right_bearing_deg,
+        UGV_MOVE_RIGHT_M,
+    )
+
+    log(
+        f"Commanding UGV right {UGV_MOVE_RIGHT_M:.1f} m "
+        f"-> ({target_lat:.7f}, {target_lon:.7f})"
+    )
+    if not bridge.send_gps_command_until_done(
+        target_lat,
+        target_lon,
+        timeout_s=UGV_COMMAND_TIMEOUT_S,
+    ):
+        log("UGV right-move GPS command failed or timed out")
+        return None
+
+    return wait_for_ugv_status(bridge)
 
 
 # MAIN 
 def main():
     master = connect()
+    bridge = None
 
     try:
         if not wait_for_gps(master):
@@ -363,15 +392,18 @@ def main():
         # fly_bearing(master, 45, 7)  # 7 m north-east
         # goto_offset(master, north_m=3, east_m=-2, alt_m=5)  # custom offset + alt
         bridge = connect_bridge()
+        bridge.clear_buffers()
 
-        ugv_coords = wait_for_ugv_gps(bridge)
-        if ugv_coords is not None:
-            target_lat, target_lon = ugv_coords
+        ugv_status = move_ugv_forward_and_right(bridge)
+        if ugv_status is not None:
+            target_lat = ugv_status["lat"]
+            target_lon = ugv_status["lon"]
             log(f"Flying to UGV location: ({target_lat:.7f}, {target_lon:.7f})")
+            time.sleep(2)  
             send_waypoint(master, target_lat, target_lon, TARGET_ALT_M)
             wait_until_reached(master, target_lat, target_lon)
         else:
-            log("No UGV GPS received — hovering in place")
+            log("UGV move sequence failed — hovering in place")
 
         log(f"Hovering for {HOVER_TIMEOUT_S} seconds")
         time.sleep(HOVER_TIMEOUT_S)
