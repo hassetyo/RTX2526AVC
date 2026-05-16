@@ -1,33 +1,4 @@
-"""
-UAV Challenge 1 - Autonomous Launch, Track, and Land on Moving UGV
-===================================================================
-Rules (Raytheon AVC '2526 Operation Touchdown - Challenge 1):
-  - UAV autonomously takes off from the UGV.
-  - After launch, UGV begins moving forward at >= 0.2 mph in a straight line.
-  - UAV must fly >= 5 seconds at >= 4 feet altitude (1.22 m).
-  - UAV must autonomously find and land on the moving UGV (ArUco marker) within 7 minutes.
-  - Once landed, the UGV continues traveling for 30 seconds before stopping.
-  - Time stops once the system has completed the 30-second post-landing travel.
 
-Flow:
-  Phase 1 - Arm + climb to TARGET_ALT (must be >= 4 ft / 1.22 m)
-  Phase 2 - Enforce minimum 5-second flight time at altitude while scanning
-  Phase 3 - Search for ArUco marker on top of the moving UGV
-  Phase 4 - Center above marker using rc roll/pitch corrections
-  Phase 5 - Final tight re-center, then descend and land
-  Phase 6 - Wait 30 seconds after touchdown while UGV continues, then stop UGV
-
-Hardware:
-  - Jetson Nano (UAV)
-  - ZED 2 stereo camera (downward-facing for ArUco detection)
-  - ArduPilot flight controller via MAVLink (/dev/ttyACM0)
-  - ESP32 V2V radio bridge (/dev/ttyUSB0) for UGV commands
-
-Notes:
-  - Calibration file must be present and valid (calibration_chessboard.yaml)
-  - ArUco marker on UGV must be DICT_6X6_1000, ID 0-4, 1ft x 1ft (0.3048 m)
-  - Do NOT remove comments or change existing functionality patterns
-"""
 
 # ── standard imports ───────────────────────────────────────────────────────────
 from pymavlink import mavutil  # confirmed mavlink pattern for flight controller
