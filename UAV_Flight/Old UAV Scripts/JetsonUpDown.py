@@ -169,7 +169,7 @@ if __name__ == "__main__":
         raise RuntimeError(f"ACK Error: Command {msgID.command} {ACK_RESULTS.get(msgID.result, msgID.result)}")
 
 
-    print(f"We up in this bitch!")
+    print(f"We up!")
     time.sleep(2)
     
     print("Landing.")
